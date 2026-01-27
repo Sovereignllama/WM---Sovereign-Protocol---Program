@@ -1,0 +1,29 @@
+[package]
+name = "sovereign-liquidity"
+version = "0.1.0"
+description = "Sovereign Liquidity Protocol - Fair launch with recovery-first LP and Genesis NFT fee rights"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "sovereign_liquidity"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+# Silence Anchor macro cfg warnings (these features are checked by Anchor but not used)
+custom-heap = []
+custom-panic = []
+anchor-debug = []
+
+[dependencies]
+anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
+anchor-spl = { version = "0.32.1", features = ["metadata"] }
+
+# Pin versions to avoid edition2024 requirement
+constant_time_eq = { workspace = true }
+blake3 = { workspace = true }

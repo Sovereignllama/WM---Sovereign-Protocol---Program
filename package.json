@@ -1,0 +1,32 @@
+{
+  "name": "sovereign-liquidity-protocol",
+  "version": "1.0.0",
+  "description": "Sovereign Liquidity Protocol - Solana",
+  "scripts": {
+    "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
+    "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
+    "test": "anchor test",
+    "deploy:devnet": "npx ts-node scripts/deploy.ts --network=devnet",
+    "deploy:mainnet": "npx ts-node scripts/deploy.ts --network=mainnet-beta",
+    "deploy:localnet": "npx ts-node scripts/deploy.ts --network=localnet",
+    "status:devnet": "npx ts-node scripts/deploy.ts --network=devnet --status",
+    "status:mainnet": "npx ts-node scripts/deploy.ts --network=mainnet-beta --status"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.30.1",
+    "@metaplex-foundation/mpl-token-metadata": "^3.2.1",
+    "@orca-so/whirlpools-sdk": "^0.13.0",
+    "@solana/spl-token": "^0.4.6",
+    "@solana/web3.js": "^1.95.0"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.5",
+    "@types/chai": "^4.3.16",
+    "@types/mocha": "^10.0.6",
+    "chai": "^4.4.1",
+    "mocha": "^10.4.0",
+    "prettier": "^3.2.5",
+    "ts-mocha": "^10.0.0",
+    "typescript": "^5.4.5"
+  }
+}
