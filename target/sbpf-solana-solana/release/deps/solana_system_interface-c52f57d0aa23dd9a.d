@@ -1,9 +1,0 @@
-/mnt/d/Sovereignty/Sovereign Liquidity Protocol - Solana/target/sbpf-solana-solana/release/deps/libsolana_system_interface-c52f57d0aa23dd9a.rmeta: /home/sovereignllama/.cargo/registry/src/index.crates.io-6f17d22bba15001f/solana-system-interface-1.0.0/src/lib.rs /home/sovereignllama/.cargo/registry/src/index.crates.io-6f17d22bba15001f/solana-system-interface-1.0.0/src/error.rs /home/sovereignllama/.cargo/registry/src/index.crates.io-6f17d22bba15001f/solana-system-interface-1.0.0/src/instruction.rs
-
-/mnt/d/Sovereignty/Sovereign Liquidity Protocol - Solana/target/sbpf-solana-solana/release/deps/libsolana_system_interface-c52f57d0aa23dd9a.rlib: /home/sovereignllama/.cargo/registry/src/index.crates.io-6f17d22bba15001f/solana-system-interface-1.0.0/src/lib.rs /home/sovereignllama/.cargo/registry/src/index.crates.io-6f17d22bba15001f/solana-system-interface-1.0.0/src/error.rs /home/sovereignllama/.cargo/registry/src/index.crates.io-6f17d22bba15001f/solana-system-interface-1.0.0/src/instruction.rs
-
-/mnt/d/Sovereignty/Sovereign Liquidity Protocol - Solana/target/sbpf-solana-solana/release/deps/solana_system_interface-c52f57d0aa23dd9a.d: /home/sovereignllama/.cargo/registry/src/index.crates.io-6f17d22bba15001f/solana-system-interface-1.0.0/src/lib.rs /home/sovereignllama/.cargo/registry/src/index.crates.io-6f17d22bba15001f/solana-system-interface-1.0.0/src/error.rs /home/sovereignllama/.cargo/registry/src/index.crates.io-6f17d22bba15001f/solana-system-interface-1.0.0/src/instruction.rs
-
-/home/sovereignllama/.cargo/registry/src/index.crates.io-6f17d22bba15001f/solana-system-interface-1.0.0/src/lib.rs:
-/home/sovereignllama/.cargo/registry/src/index.crates.io-6f17d22bba15001f/solana-system-interface-1.0.0/src/error.rs:
-/home/sovereignllama/.cargo/registry/src/index.crates.io-6f17d22bba15001f/solana-system-interface-1.0.0/src/instruction.rs:
