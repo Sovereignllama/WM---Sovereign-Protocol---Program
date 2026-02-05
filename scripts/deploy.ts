@@ -23,38 +23,43 @@ import * as path from "path";
 
 const CONFIG = {
   // Network endpoints
+  // Gorbagana (GOR) - Solana fork
   networks: {
     localnet: "http://localhost:8899",
-    devnet: "https://api.devnet.solana.com",
-    "mainnet-beta": "https://api.mainnet-beta.solana.com",
+    devnet: "https://rpc.trashscan.io",               // Trashscan RPC (devnet)
+    "mainnet-beta": "https://rpc.gorbagana.io",       // Gorbagana RPC (mainnet)
   },
 
   // Protocol parameters (defaults match on-chain defaults, adjust as needed)
   protocolParams: {
-    // Creation fee: 1% of bond target (100 bps)
-    creationFeeBps: 100,
-    
-    // Minimum fee: 0.05 SOL (non-refundable on failed bonding)
-    minFeeLamports: 0.05 * LAMPORTS_PER_SOL,
-    
-    // Governance unwind fee: 0.05 SOL
-    governanceUnwindFeeLamports: 0.05 * LAMPORTS_PER_SOL,
-    
-    // Unwind fee: 5% of SOL returned (500 bps)
-    unwindFeeBps: 500,
-    
+    // Creation fee: 0.5% of bond target (50 bps)
+    creationFeeBps: 50,
+
+    // Minimum fee: default 10,000 GOR (non-refundable on failed bonding)
+    // Can be set from 1 GOR (1 lamport) to infinity
+    minFeeLamports: 10_000,
+
+    // Governance unwind fee: default 10,000 GOR
+    // Can be set from 1 GOR (1 lamport) to infinity
+    governanceUnwindFeeLamports: 10_000,
+
+    // Unwind fee: default 10,000 GOR (flat)
+    // Can be set from 1 GOR (1 lamport) to infinity
+    unwindFeeBps: 0, // Set to 0 for flat fee, handled as lamports below if needed
+    unwindFeeLamports: 10_000,
+
     // BYO Token minimum supply: 30% (3000 bps)
     byoMinSupplyBps: 3000,
-    
-    // Minimum bond target: 50 SOL
+
+    // Minimum bond target: 50 * LAMPORTS_PER_SOL (unchanged)
     minBondTarget: 50 * LAMPORTS_PER_SOL,
-    
-    // Minimum deposit: 0.1 SOL
-    minDeposit: 0.1 * LAMPORTS_PER_SOL,
-    
+
+    // Minimum deposit: 1,000 GOR
+    minDeposit: 1_000,
+
     // Auto-unwind period: 90 days (in seconds)
     autoUnwindPeriod: 90 * 24 * 60 * 60,
-    
+
     // Activity check threshold (minimum fee growth to count as "active")
     minFeeGrowthThreshold: 1000,
   },
@@ -72,7 +77,7 @@ async function loadKeypair(keypairPath: string): Promise<Keypair> {
 
 async function getProtocolStatePDA(programId: PublicKey): Promise<[PublicKey, number]> {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from("protocol")],
+    [Buffer.from("protocol_state")],
     programId
   );
 }
@@ -108,7 +113,7 @@ async function initializeProtocol(
       protocolState: protocolStatePDA,
       treasury: treasury,
       systemProgram: anchor.web3.SystemProgram.programId,
-    })
+    } as any)
     .signers([authority])
     .rpc();
 
@@ -139,7 +144,7 @@ async function updateProtocolFees(
     .accounts({
       authority: authority.publicKey,
       protocolState: protocolStatePDA,
-    })
+    } as any)
     .signers([authority])
     .rpc();
 
@@ -164,16 +169,16 @@ async function printProtocolState(program: Program<SovereignLiquidity>): Promise
     console.log("-".repeat(60));
     console.log("FEES:");
     console.log(`  Creation Fee:               ${state.creationFeeBps / 100}% (${state.creationFeeBps} bps)`);
-    console.log(`  Min Fee:                    ${Number(state.minFeeLamports) / LAMPORTS_PER_SOL} SOL`);
+    console.log(`  Min Fee:                    ${Number(state.minFeeLamports) / LAMPORTS_PER_SOL} GOR`);
     console.log("-".repeat(60));
     console.log("LIMITS:");
-    console.log(`  Min Bond Target:            ${Number(state.minBondTarget) / LAMPORTS_PER_SOL} SOL`);
-    console.log(`  Min Deposit:                ${Number(state.minDeposit) / LAMPORTS_PER_SOL} SOL`);
+    console.log(`  Min Bond Target:            ${Number(state.minBondTarget) / LAMPORTS_PER_SOL} GOR`);
+    console.log(`  Min Deposit:                ${Number(state.minDeposit) / LAMPORTS_PER_SOL} GOR`);
     console.log(`  Auto-Unwind Period:         ${Number(state.autoUnwindPeriod) / (24 * 60 * 60)} days`);
     console.log("-".repeat(60));
     console.log("STATS:");
     console.log(`  Total Sovereigns:           ${state.sovereignCount}`);
-    console.log(`  Total Fees Collected:       ${Number(state.totalFeesCollected) / LAMPORTS_PER_SOL} SOL`);
+    console.log(`  Total Fees Collected:       ${Number(state.totalFeesCollected) / LAMPORTS_PER_SOL} GOR`);
     console.log("=".repeat(60));
   } catch (e) {
     console.log("\n❌ Protocol not initialized yet");
@@ -218,7 +223,7 @@ async function main() {
 
   // Check balance
   const balance = await connection.getBalance(authority.publicKey);
-  console.log(`💰 Balance: ${balance / LAMPORTS_PER_SOL} SOL`);
+  console.log(`💰 Balance: ${balance / LAMPORTS_PER_SOL} GOR`);
 
   if (balance < 0.1 * LAMPORTS_PER_SOL) {
     console.log("\n⚠️  Warning: Low balance. Consider funding the wallet.");
@@ -259,12 +264,13 @@ async function main() {
     return;
   }
 
-  // Treasury address (defaults to authority, update for production!)
+  // Treasury address - use configured address or env var
+  const TREASURY_ADDRESS = "4RKDExub3WSqgairnZBGFLzvrxmJLxM2ocPaVDr7GXnL";
   const treasury = process.env.TREASURY_ADDRESS 
     ? new PublicKey(process.env.TREASURY_ADDRESS)
-    : authority.publicKey;
+    : new PublicKey(TREASURY_ADDRESS);
 
-  if (treasury.equals(authority.publicKey) && network === "mainnet-beta") {
+  if (treasury.toBase58() === authority.publicKey.toBase58() && network === "mainnet-beta") {
     console.log("\n⚠️  Warning: Treasury is set to deployer address.");
     console.log("   Set TREASURY_ADDRESS env var for production.");
   }

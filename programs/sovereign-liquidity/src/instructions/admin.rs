@@ -1,8 +1,18 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program::invoke_signed;
+use anchor_spl::token_2022::{
+    Token2022,
+    spl_token_2022::{
+        self,
+        extension::transfer_fee::instruction as transfer_fee_ix,
+        instruction::{set_authority, AuthorityType},
+    },
+};
+use anchor_spl::token_interface::Mint as MintInterface;
 use crate::state::*;
 use crate::constants::*;
 use crate::errors::SovereignError;
-use crate::events::{ProtocolFeesUpdated, FeeThresholdUpdated, FeeThresholdRenounced};
+use crate::events::{ProtocolFeesUpdated, FeeThresholdUpdated, FeeThresholdRenounced, SellFeeUpdated, SellFeeRenounced};
 
 /// Update protocol-level fee parameters
 /// Only callable by protocol authority
@@ -217,5 +227,196 @@ pub struct SetProtocolPaused<'info> {
 pub fn set_protocol_paused_handler(ctx: Context<SetProtocolPaused>, paused: bool) -> Result<()> {
     let protocol = &mut ctx.accounts.protocol_state;
     protocol.paused = paused;
+    Ok(())
+}
+
+// ============================================================
+// SELL FEE MANAGEMENT (TokenLaunch only)
+// ============================================================
+
+/// Update the sell fee for a TokenLaunch sovereign
+/// Can adjust up to MAX_SELL_FEE_BPS (3%). Creator calls this.
+#[derive(Accounts)]
+pub struct UpdateSellFee<'info> {
+    #[account(
+        address = sovereign.creator @ SovereignError::NotCreator
+    )]
+    pub creator: Signer<'info>,
+    
+    #[account(
+        mut,
+        seeds = [SOVEREIGN_SEED, &sovereign.sovereign_id.to_le_bytes()],
+        bump = sovereign.bump,
+        constraint = sovereign.sovereign_type == SovereignType::TokenLaunch @ SovereignError::InvalidSovereignType,
+        constraint = !sovereign.fee_control_renounced @ SovereignError::FeeControlRenounced
+    )]
+    pub sovereign: Account<'info, SovereignState>,
+    
+    /// The token mint with TransferFeeConfig
+    #[account(
+        mut,
+        address = sovereign.token_mint
+    )]
+    pub token_mint: InterfaceAccount<'info, MintInterface>,
+    
+    pub token_program_2022: Program<'info, Token2022>,
+}
+
+pub fn update_sell_fee_handler(
+    ctx: Context<UpdateSellFee>,
+    new_fee_bps: u16,
+) -> Result<()> {
+    let sovereign = &mut ctx.accounts.sovereign;
+    
+    // Must be within valid range (0 to 3%)
+    require!(
+        new_fee_bps <= MAX_SELL_FEE_BPS,
+        SovereignError::SellFeeExceedsMax
+    );
+    
+    let old_fee = sovereign.sell_fee_bps;
+    
+    // Derive sovereign PDA seeds for signing
+    let sovereign_id_bytes = sovereign.sovereign_id.to_le_bytes();
+    let sovereign_seeds = &[
+        SOVEREIGN_SEED,
+        &sovereign_id_bytes,
+        &[sovereign.bump],
+    ];
+    let sovereign_signer = &[&sovereign_seeds[..]];
+    
+    // Update the TransferFeeConfig on the mint
+    let set_fee_ix = transfer_fee_ix::set_transfer_fee(
+        &spl_token_2022::ID,
+        &ctx.accounts.token_mint.key(),
+        &sovereign.key(), // Transfer fee config authority
+        &[],
+        new_fee_bps,
+        u64::MAX, // No max fee cap
+    )?;
+    
+    invoke_signed(
+        &set_fee_ix,
+        &[
+            ctx.accounts.token_mint.to_account_info(),
+            sovereign.to_account_info(),
+        ],
+        sovereign_signer,
+    )?;
+    
+    // Update sovereign state
+    sovereign.sell_fee_bps = new_fee_bps;
+    
+    emit!(SellFeeUpdated {
+        sovereign_id: sovereign.sovereign_id,
+        old_fee_bps: old_fee,
+        new_fee_bps,
+        updated_by: ctx.accounts.creator.key(),
+    });
+    
+    Ok(())
+}
+
+/// Permanently renounce sell fee control
+/// Sets fee to 0% and removes authority - IRREVERSIBLE
+/// Can only be called after recovery is complete (or anytime for FairLaunch mode)
+#[derive(Accounts)]
+pub struct RenounceSellFee<'info> {
+    #[account(
+        address = sovereign.creator @ SovereignError::NotCreator
+    )]
+    pub creator: Signer<'info>,
+    
+    #[account(
+        mut,
+        seeds = [SOVEREIGN_SEED, &sovereign.sovereign_id.to_le_bytes()],
+        bump = sovereign.bump,
+        constraint = sovereign.sovereign_type == SovereignType::TokenLaunch @ SovereignError::InvalidSovereignType,
+        constraint = !sovereign.fee_control_renounced @ SovereignError::FeeControlRenounced
+    )]
+    pub sovereign: Account<'info, SovereignState>,
+    
+    /// The token mint with TransferFeeConfig
+    #[account(
+        mut,
+        address = sovereign.token_mint
+    )]
+    pub token_mint: InterfaceAccount<'info, MintInterface>,
+    
+    pub token_program_2022: Program<'info, Token2022>,
+}
+
+pub fn renounce_sell_fee_handler(ctx: Context<RenounceSellFee>) -> Result<()> {
+    let sovereign = &mut ctx.accounts.sovereign;
+    
+    // For FairLaunch mode, can renounce anytime
+    // For other modes, must wait until recovery is complete
+    if sovereign.fee_mode != FeeMode::FairLaunch {
+        require!(
+            sovereign.state == SovereignStatus::Active,
+            SovereignError::RecoveryNotComplete
+        );
+    }
+    
+    let old_fee = sovereign.sell_fee_bps;
+    
+    // Derive sovereign PDA seeds for signing
+    let sovereign_id_bytes = sovereign.sovereign_id.to_le_bytes();
+    let sovereign_seeds = &[
+        SOVEREIGN_SEED,
+        &sovereign_id_bytes,
+        &[sovereign.bump],
+    ];
+    let sovereign_signer = &[&sovereign_seeds[..]];
+    
+    // First, set the fee to 0
+    let set_fee_ix = transfer_fee_ix::set_transfer_fee(
+        &spl_token_2022::ID,
+        &ctx.accounts.token_mint.key(),
+        &sovereign.key(),
+        &[],
+        0, // Set to 0%
+        0, // Max fee also 0
+    )?;
+    
+    invoke_signed(
+        &set_fee_ix,
+        &[
+            ctx.accounts.token_mint.to_account_info(),
+            sovereign.to_account_info(),
+        ],
+        sovereign_signer,
+    )?;
+    
+    // Then remove the transfer fee config authority (makes it immutable)
+    // Setting authority to None means no one can ever change the fee again
+    let set_authority_ix = set_authority(
+        &spl_token_2022::ID,
+        &ctx.accounts.token_mint.key(),
+        None, // New authority = None (renounced)
+        AuthorityType::TransferFeeConfig,
+        &sovereign.key(), // Current authority
+        &[], // No multisig signers
+    )?;
+    
+    invoke_signed(
+        &set_authority_ix,
+        &[
+            ctx.accounts.token_mint.to_account_info(),
+            sovereign.to_account_info(),
+        ],
+        sovereign_signer,
+    )?;
+    
+    // Update sovereign state
+    sovereign.sell_fee_bps = 0;
+    sovereign.fee_control_renounced = true;
+    
+    emit!(SellFeeRenounced {
+        sovereign_id: sovereign.sovereign_id,
+        old_fee_bps: old_fee,
+        renounced_by: ctx.accounts.creator.key(),
+    });
+    
     Ok(())
 }

@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-/// Controls the Orca Whirlpool position NFT
+/// Controls the Trashbin SAMM (Raydium CLMM) position NFT
 /// This PDA is the permanent delegate/owner of the position
 /// - Allows fee collection only
 /// - During Recovery: LP locked, can be unwound via governance
@@ -11,8 +11,8 @@ pub struct PermanentLock {
     /// The sovereign this lock belongs to
     pub sovereign: Pubkey,
     
-    /// The Whirlpool address
-    pub whirlpool: Pubkey,
+    /// The Trashbin SAMM PoolState address
+    pub pool_state: Pubkey,
     
     /// Position NFT mint address
     pub position_mint: Pubkey,
@@ -48,7 +48,7 @@ pub struct PermanentLock {
 impl PermanentLock {
     pub const LEN: usize = 8  // discriminator
         + 32  // sovereign
-        + 32  // whirlpool
+        + 32  // pool_state
         + 32  // position_mint
         + 32  // position
         + 32  // position_token_account

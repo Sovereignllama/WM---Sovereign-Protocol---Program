@@ -9,6 +9,9 @@ pub enum SovereignError {
     #[msg("Sovereign is not in the expected state")]
     InvalidState,
     
+    #[msg("Invalid account data or discriminator mismatch")]
+    InvalidAccountData,
+    
     #[msg("Bonding deadline has passed")]
     DeadlinePassed,
     
@@ -201,8 +204,11 @@ pub enum SovereignError {
     // VALIDATION ERRORS (6120-6139)
     // ============================================================
     
-    #[msg("Invalid pool - does not match sovereign's whirlpool")]
+    #[msg("Invalid pool - does not match sovereign's pool_state")]
     InvalidPool,
+    
+    #[msg("Invalid mint - does not match sovereign's token_mint")]
+    InvalidMint,
     
     #[msg("Invalid program ID for CPI")]
     InvalidProgram,
@@ -301,6 +307,24 @@ pub enum SovereignError {
     #[msg("Token Launcher: Missing token supply")]
     MissingTokenSupply,
     
+    #[msg("Token Launcher: Invalid token name (1-32 chars)")]
+    InvalidTokenName,
+    
+    #[msg("Token Launcher: Invalid token symbol (1-10 chars)")]
+    InvalidTokenSymbol,
+    
+    #[msg("Token Launcher: Invalid token supply (must be > 0)")]
+    InvalidTokenSupply,
+    
+    #[msg("Token Launcher: Invalid metadata URI (1-200 chars)")]
+    InvalidMetadataUri,
+    
+    #[msg("Invalid sovereign type for this operation")]
+    InvalidSovereignType,
+    
+    #[msg("Token has already been created for this sovereign")]
+    TokenAlreadyCreated,
+    
     // ============================================================
     // BYO TOKEN ERRORS (6220-6239)
     // ============================================================
@@ -365,4 +389,14 @@ pub enum SovereignError {
     
     #[msg("Activity check cooldown has not elapsed (7 days required)")]
     ActivityCheckCooldownNotElapsed,
+    
+    // ============================================================
+    // MAINNET SAFETY ERRORS (6320-6339)
+    // ============================================================
+    
+    #[msg("Missing SAMM accounts - required for mainnet deployment")]
+    MissingSAMMAccounts,
+    
+    #[msg("Voting power calculation overflow - value exceeds u16 max")]
+    VotingPowerOverflow,
 }

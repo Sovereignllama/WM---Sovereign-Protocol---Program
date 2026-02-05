@@ -7,10 +7,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-sovereign_liquidity = "SLPsoL1qNqFhGKLgABFhgErrrYoRb4t4HKLd6VCRYQL"
+sovereign_liquidity = "2LPPAG7UhVop1RiRBh8oZtjzMoJ9St9WV4nY7JwmoNbA"
 
 [programs.devnet]
-sovereign_liquidity = "SLPsoL1qNqFhGKLgABFhgErrrYoRb4t4HKLd6VCRYQL"
+sovereign_liquidity = "2LPPAG7UhVop1RiRBh8oZtjzMoJ9St9WV4nY7JwmoNbA"
 
 [registry]
 url = "https://api.apr.dev"

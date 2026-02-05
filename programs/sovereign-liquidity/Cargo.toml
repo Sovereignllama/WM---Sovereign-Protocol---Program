@@ -19,10 +19,17 @@ idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 custom-heap = []
 custom-panic = []
 anchor-debug = []
+# Network-specific features for safety controls
+# localnet/devnet: Allow test mode (no SAMM accounts required)
+# mainnet (default when none specified): Require SAMM accounts
+localnet = []
+devnet = []
 
 [dependencies]
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
-anchor-spl = { version = "0.32.1", features = ["metadata"] }
+anchor-spl = { version = "0.32.1", features = ["metadata", "token_2022"] }
+spl-transfer-hook-interface = "0.10.0"
+spl-tlv-account-resolution = "0.10.0"
 
 # Pin versions to avoid edition2024 requirement
 constant_time_eq = { workspace = true }

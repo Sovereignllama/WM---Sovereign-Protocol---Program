@@ -20,6 +20,17 @@ pub struct SovereignCreated {
 }
 
 #[event]
+pub struct TokenCreated {
+    pub sovereign_id: u64,
+    pub token_mint: Pubkey,
+    pub total_supply: u64,
+    pub decimals: u8,
+    pub name: String,
+    pub symbol: String,
+    pub uri: String,
+}
+
+#[event]
 pub struct SovereignFinalized {
     pub sovereign_id: u64,
     pub total_deposited: u64,
@@ -103,6 +114,30 @@ pub struct RecoveryComplete {
 pub struct PoolRestricted {
     pub sovereign_id: u64,
     pub restricted: bool,
+}
+
+// ============================================================
+// TRANSFER HOOK EVENTS
+// ============================================================
+
+#[event]
+pub struct TransferHookExecuted {
+    pub sovereign_id: u64,
+    pub mint: Pubkey,
+    pub source: Pubkey,
+    pub destination: Pubkey,
+    pub amount: u64,
+    pub fee_amount: u64,
+    pub is_sell: bool,
+    pub fee_mode: FeeMode,
+}
+
+#[event]
+pub struct TransferFeesHarvested {
+    pub sovereign_id: u64,
+    pub fee_mode: FeeMode,
+    pub to_creator: bool,
+    pub source_count: u32,
 }
 
 // ============================================================
@@ -237,5 +272,20 @@ pub struct FeeThresholdUpdated {
 pub struct FeeThresholdRenounced {
     pub sovereign_id: u64,
     pub old_threshold_bps: u16,
+    pub renounced_by: Pubkey,
+}
+
+#[event]
+pub struct SellFeeUpdated {
+    pub sovereign_id: u64,
+    pub old_fee_bps: u16,
+    pub new_fee_bps: u16,
+    pub updated_by: Pubkey,
+}
+
+#[event]
+pub struct SellFeeRenounced {
+    pub sovereign_id: u64,
+    pub old_fee_bps: u16,
     pub renounced_by: Pubkey,
 }

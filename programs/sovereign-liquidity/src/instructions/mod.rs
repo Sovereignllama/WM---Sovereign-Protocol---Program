@@ -1,5 +1,7 @@
 pub mod initialize_protocol;
 pub mod create_sovereign;
+pub mod create_token;
+pub mod transfer_hook;
 pub mod deposit;
 pub mod withdraw;
 pub mod finalize;
@@ -9,11 +11,14 @@ pub mod activity_check;
 pub mod failed_bonding;
 pub mod admin;
 
-// Use glob re-exports for Anchor compatibility
-// Note: The "ambiguous glob re-exports" warning for `handler` is benign
-// since lib.rs uses fully qualified paths (e.g., instructions::deposit::handler)
+// Glob re-exports for Anchor compatibility
+// Note: "ambiguous glob re-exports" warning for `handler` is benign -
+// lib.rs uses fully qualified paths (e.g., instructions::deposit::handler)
+#[allow(ambiguous_glob_reexports)]
 pub use initialize_protocol::*;
 pub use create_sovereign::*;
+pub use create_token::*;
+pub use transfer_hook::*;
 pub use deposit::*;
 pub use withdraw::*;
 pub use finalize::*;

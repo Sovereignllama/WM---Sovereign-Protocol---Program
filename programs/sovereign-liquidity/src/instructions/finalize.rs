@@ -5,6 +5,7 @@ use crate::state::*;
 use crate::constants::*;
 use crate::errors::SovereignError;
 use crate::events::{SovereignFinalized, GenesisNFTMinted, CreatorMarketBuyExecuted, PoolRestricted};
+use crate::samm::{self, instructions as samm_ix, cpi as samm_cpi};
 
 /// Finalize the sovereign - create pool, add liquidity, mint NFTs
 /// This is a complex multi-step process that may need to be split across multiple transactions
@@ -67,13 +68,13 @@ pub struct Finalize<'info> {
     )]
     pub nft_collection_mint: Account<'info, Mint>,
     
-    // ============ Whirlpool Accounts ============
+    // ============ Trashbin SAMM Accounts ============
     // These will be used to create the pool and add liquidity
-    // Due to complexity, we may need to use remaining_accounts for Whirlpool CPI
+    // Due to complexity, we may need to use remaining_accounts for SAMM CPI
     
-    /// CHECK: Whirlpool program
-    #[account(address = WHIRLPOOL_PROGRAM_ID)]
-    pub whirlpool_program: UncheckedAccount<'info>,
+    /// CHECK: Trashbin SAMM program
+    #[account(address = SAMM_PROGRAM_ID)]
+    pub samm_program: UncheckedAccount<'info>,
     
     // ============ Standard Programs ============
     pub token_program: Program<'info, Token>,
@@ -82,7 +83,10 @@ pub struct Finalize<'info> {
     pub rent: Sysvar<'info, Rent>,
 }
 
-pub fn handler(ctx: Context<Finalize>) -> Result<()> {
+pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, Finalize<'info>>) -> Result<()> {
+    // Get sovereign key before mutable borrow to avoid borrow checker conflict
+    let sovereign_key = ctx.accounts.sovereign.key();
+    
     let sovereign = &mut ctx.accounts.sovereign;
     let protocol = &ctx.accounts.protocol_state;
     let clock = Clock::get()?;
@@ -147,19 +151,154 @@ pub fn handler(ctx: Context<Finalize>) -> Result<()> {
     // For TokenLaunch: mint creator's 20% to creator's ATA
     // This would be handled via remaining_accounts to keep the main struct simpler
     
-    // ============ Whirlpool Integration ============
-    // The actual Whirlpool CPI calls are complex and require many accounts
-    // In production, this would involve:
-    // 1. Create/initialize whirlpool if not exists
-    // 2. Open position with FULL_RANGE (MIN_TICK to MAX_TICK)
-    // 3. Add liquidity (80% tokens + all investor SOL)
-    // 4. Set pool to restricted mode (blocked transfers during recovery)
-    // 5. Execute creator market buy if creator_escrow > 0
+    // ============ Trashbin SAMM Integration ============
+    // The SAMM CPI calls require many accounts passed via remaining_accounts
+    // Expected remaining_accounts order for finalization:
+    // [0] amm_config - AMM configuration account
+    // [1] pool_state - Pool state PDA (writable)
+    // [2] position_nft_mint - Position NFT mint (to be created, writable)
+    // [3] position_nft_account - Position NFT token account (writable)
+    // [4] metadata_account - Metaplex metadata for position NFT
+    // [5] protocol_position - Protocol position state (writable)
+    // [6] tick_array_lower - Lower tick array (writable)
+    // [7] tick_array_upper - Upper tick array (writable)
+    // [8] personal_position - Personal position state (writable)
+    // [9] token_account_0 - Token A account (GOR) (writable)
+    // [10] token_account_1 - Token B account (project token) (writable)
+    // [11] token_vault_0 - Pool token vault A (writable)
+    // [12] token_vault_1 - Pool token vault B (writable)
+    // [13] observation_state - Oracle observation (writable)
+    // [14] token_program_2022 - Token 2022 program (optional)
+    // [15] vault_0_mint - Vault 0 mint
+    // [16] vault_1_mint - Vault 1 mint
+    // [17] metadata_program - Metaplex program
     
-    // For now, we'll store the necessary state and emit events
-    // The actual Whirlpool CPI would be implemented in a separate module
+    // Calculate liquidity to add (full range)
+    let sol_amount = ctx.accounts.sol_vault.lamports();
+    let token_amount = ctx.accounts.token_vault.amount;
     
-    // Initialize permanent lock
+    // Note: In production, fetch sqrt_price_x64 from pool_state or calculate
+    // For initial pool creation, calculate theoretical price:
+    // price = token_amount / sol_amount (tokens per SOL)
+    // sqrt_price_x64 = sqrt(price) * 2^64
+    let initial_price = token_amount as f64 / sol_amount as f64;
+    let sqrt_price_x64 = samm_cpi::price_to_sqrt_price_x64(initial_price);
+    
+    // Calculate liquidity for full range position
+    let liquidity = samm_cpi::calculate_full_range_liquidity(
+        sol_amount,
+        token_amount,
+        sqrt_price_x64,
+    );
+    
+    // Build SAMM CPI if remaining_accounts are provided
+    // In a single-instruction flow, these would be validated and used
+    // For complex finalization, this may be split across multiple transactions
+    
+    if ctx.remaining_accounts.len() >= 18 {
+        // SECURITY: Validate pool_state address if provided
+        // For finalization, we're creating the pool so we store the address
+        // For subsequent operations, we validate against stored address
+        
+        // Full SAMM integration with all required accounts
+        let pool_state_info = &ctx.remaining_accounts[1];
+        
+        // Step 1: Open position with full range (MIN_TICK to MAX_TICK)
+        // This creates the genesis LP position
+        msg!("Opening full-range SAMM position...");
+        
+        // Build open_position_v2 accounts
+        let open_position_accounts = samm_ix::OpenPositionV2Accounts {
+            payer: ctx.accounts.payer.to_account_info(),
+            position_nft_owner: ctx.accounts.permanent_lock.to_account_info(),
+            position_nft_mint: ctx.remaining_accounts[2].clone(),
+            position_nft_account: ctx.remaining_accounts[3].clone(),
+            metadata_account: ctx.remaining_accounts[4].clone(),
+            pool_state: ctx.remaining_accounts[1].clone(),
+            protocol_position: ctx.remaining_accounts[5].clone(),
+            tick_array_lower: ctx.remaining_accounts[6].clone(),
+            tick_array_upper: ctx.remaining_accounts[7].clone(),
+            personal_position: ctx.remaining_accounts[8].clone(),
+            token_account_0: ctx.remaining_accounts[9].clone(),
+            token_account_1: ctx.remaining_accounts[10].clone(),
+            token_vault_0: ctx.remaining_accounts[11].clone(),
+            token_vault_1: ctx.remaining_accounts[12].clone(),
+            rent: ctx.accounts.rent.to_account_info(),
+            system_program: ctx.accounts.system_program.to_account_info(),
+            token_program: ctx.accounts.token_program.to_account_info(),
+            associated_token_program: ctx.accounts.associated_token_program.to_account_info(),
+            metadata_program: ctx.remaining_accounts[17].clone(),
+            token_program_2022: ctx.remaining_accounts[14].clone(),
+            vault_0_mint: ctx.remaining_accounts[15].clone(),
+            vault_1_mint: ctx.remaining_accounts[16].clone(),
+        };
+        
+        // Use permanent_lock as signer for position NFT ownership
+        // sovereign_key was captured at function start to avoid borrow conflict
+        let lock_seeds = &[
+            PERMANENT_LOCK_SEED,
+            sovereign_key.as_ref(),
+            &[ctx.bumps.permanent_lock],
+        ];
+        let lock_signer_seeds = &[&lock_seeds[..]];
+        
+        // CPI: Open position with full range
+        let position_nft_mint = samm_cpi::open_position_full_range(
+            &ctx.accounts.samm_program.to_account_info(),
+            open_position_accounts,
+            liquidity,
+            sol_amount,
+            token_amount,
+            DEFAULT_TICK_SPACING as i32,
+            lock_signer_seeds,
+        )?;
+        
+        msg!("Position NFT created: {}", position_nft_mint);
+        
+        // Step 2: Set pool to restricted mode (disable external LPs)
+        // bit0 = 1 disables open_position and increase_liquidity
+        msg!("Setting pool to recovery-restricted mode...");
+        
+        samm_cpi::set_pool_status_restricted(
+            &ctx.accounts.samm_program.to_account_info(),
+            &ctx.accounts.permanent_lock.to_account_info(),
+            pool_state_info,
+            lock_signer_seeds,
+        )?;
+        
+        // Update permanent lock with position info
+        let permanent_lock = &mut ctx.accounts.permanent_lock;
+        permanent_lock.position_mint = position_nft_mint;
+        permanent_lock.pool_state = pool_state_info.key();
+        permanent_lock.tick_lower_index = samm::tick::MIN_TICK;
+        permanent_lock.tick_upper_index = samm::tick::MAX_TICK;
+        permanent_lock.liquidity = liquidity;
+    } else {
+        // SECURITY: In mainnet/production, SAMM accounts are REQUIRED
+        // Test mode only allowed in localnet/devnet builds
+        #[cfg(not(any(feature = "localnet", feature = "devnet")))]
+        {
+            msg!("ERROR: SAMM accounts required for mainnet deployment");
+            return Err(SovereignError::MissingSAMMAccounts.into());
+        }
+        
+        // Simplified flow without full SAMM integration
+        // This allows testing without all the SAMM accounts
+        #[cfg(any(feature = "localnet", feature = "devnet"))]
+        {
+            msg!("SAMM accounts not provided - skipping CPI (test mode)");
+            
+            // Initialize permanent lock with placeholder values
+            let permanent_lock = &mut ctx.accounts.permanent_lock;
+            permanent_lock.position_mint = Pubkey::default();
+            permanent_lock.pool_state = Pubkey::default();
+            permanent_lock.tick_lower_index = MIN_TICK_INDEX;
+            permanent_lock.tick_upper_index = MAX_TICK_INDEX;
+            permanent_lock.liquidity = liquidity;
+        }
+    }
+    
+    // Initialize permanent lock common fields
     let permanent_lock = &mut ctx.accounts.permanent_lock;
     permanent_lock.sovereign = sovereign.key();
     permanent_lock.position_mint = Pubkey::default(); // Set after position creation
@@ -293,6 +432,13 @@ pub fn mint_genesis_nft_handler(ctx: Context<MintGenesisNFT>) -> Result<()> {
     let voting_power = deposit_record.amount
         .checked_mul(BPS_DENOMINATOR as u64).unwrap()
         .checked_div(sovereign.total_deposited).unwrap();
+    
+    // SECURITY: Validate voting_power fits in u16 before cast
+    // This should always be true (max 10000 BPS) but we verify to prevent truncation
+    require!(
+        voting_power <= u16::MAX as u64,
+        SovereignError::Overflow
+    );
     
     // Mint the NFT
     let sovereign_id_bytes = sovereign.sovereign_id.to_le_bytes();

@@ -1,6 +1,13 @@
 use anchor_lang::prelude::*;
 
 // ============================================================
+// TOKEN CONSTANTS
+// ============================================================
+
+/// Standard token decimals for TokenLaunch mints
+pub const TOKEN_DECIMALS: u8 = 9;
+
+// ============================================================
 // LAMPORTS
 // ============================================================
 
@@ -103,7 +110,7 @@ pub const CREATOR_MAX_BUY_BPS: u16 = 100;
 pub const LP_ALLOCATION_BPS: u16 = 8000;
 
 // ============================================================
-// WHIRLPOOL CONSTANTS
+// TRASHBIN SAMM (RAYDIUM CLMM) CONSTANTS
 // ============================================================
 
 /// Minimum tick index for full range
@@ -112,8 +119,14 @@ pub const MIN_TICK_INDEX: i32 = -443636;
 /// Maximum tick index for full range
 pub const MAX_TICK_INDEX: i32 = 443636;
 
-/// Default tick spacing for Orca whirlpools
+/// Default tick spacing for Raydium CLMM pools
 pub const DEFAULT_TICK_SPACING: u16 = 64;
+
+/// Pool status bit: Disable open position & increase liquidity
+pub const POOL_STATUS_DISABLE_OPEN_POSITION: u8 = 0b00001;
+
+/// Pool status: All operations allowed
+pub const POOL_STATUS_ALLOW_ALL: u8 = 0b00000;
 
 // ============================================================
 // PROTOCOL DEFAULTS
@@ -147,6 +160,7 @@ pub const DEPOSIT_RECORD_SEED: &[u8] = b"deposit_record";
 pub const CREATOR_TRACKER_SEED: &[u8] = b"creator_tracker";
 pub const CREATOR_FEE_TRACKER_SEED: &[u8] = b"creator_tracker"; // Alias
 pub const PERMANENT_LOCK_SEED: &[u8] = b"permanent_lock";
+pub const TOKEN_MINT_SEED: &[u8] = b"token_mint";
 pub const TOKEN_VAULT_SEED: &[u8] = b"token_vault";
 pub const SOL_VAULT_SEED: &[u8] = b"sol_vault";
 pub const CREATION_FEE_ESCROW_SEED: &[u8] = b"creation_fee_escrow";
@@ -159,15 +173,16 @@ pub const GENESIS_NFT_MINT_SEED: &[u8] = b"genesis_nft_mint";
 // EXTERNAL PROGRAM IDS
 // ============================================================
 
-/// Orca Whirlpool Program ID
-pub const WHIRLPOOL_PROGRAM_ID: Pubkey = whirlpool::ID;
+/// Trashbin SAMM Program ID (Raydium CLMM fork on Gorbagana)
+pub const SAMM_PROGRAM_ID: Pubkey = samm::ID;
 
 /// Metaplex Token Metadata Program ID  
 pub const METAPLEX_PROGRAM_ID: Pubkey = token_metadata::ID;
 
-pub mod whirlpool {
+/// Trashbin SAMM (Raydium CLMM fork)
+pub mod samm {
     use anchor_lang::prelude::*;
-    declare_id!("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc");
+    declare_id!("WTzkPUoprVx7PDc1tfKA5sS7k1ynCgU89WtwZhksHX5");
 }
 
 /// Metaplex Token Metadata Program ID

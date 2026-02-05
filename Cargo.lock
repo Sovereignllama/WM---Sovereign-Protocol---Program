@@ -2328,6 +2328,8 @@ dependencies = [
  "anchor-spl",
  "blake3",
  "constant_time_eq",
+ "spl-tlv-account-resolution",
+ "spl-transfer-hook-interface",
 ]
 
 [[package]]

@@ -4,11 +4,12 @@ pub mod constants;
 pub mod errors;
 pub mod events;
 pub mod instructions;
+pub mod samm;
 pub mod state;
 
 use instructions::*;
 
-declare_id!("SLPsoL1qNqFhGKLgABFhgErrrYoRb4t4HKLd6VCRYQL");
+declare_id!("2LPPAG7UhVop1RiRBh8oZtjzMoJ9St9WV4nY7JwmoNbA");
 
 #[program]
 pub mod sovereign_liquidity {
@@ -31,6 +32,34 @@ pub mod sovereign_liquidity {
         instructions::create_sovereign::handler(ctx, params)
     }
 
+    /// Create Token-2022 mint for a TokenLaunch sovereign
+    /// Must be called after create_sovereign for TokenLaunch types
+    pub fn create_token(
+        ctx: Context<CreateToken>,
+        params: CreateTokenParams,
+    ) -> Result<()> {
+        instructions::create_token::handler(ctx, params)
+    }
+
+    // ============ Transfer Hook (Sell Fees) ============
+    
+    /// Initialize extra account metas for transfer hook
+    /// Must be called after create_token to set up the hook
+    pub fn initialize_extra_account_metas(
+        ctx: Context<InitializeExtraAccountMetas>,
+    ) -> Result<()> {
+        instructions::transfer_hook::initialize_extra_account_metas_handler(ctx)
+    }
+    
+    /// Transfer hook execute - called by Token-2022 on every transfer
+    /// Handles sell fee calculation and tracking
+    pub fn transfer_hook_execute(
+        ctx: Context<TransferHookExecute>,
+        amount: u64,
+    ) -> Result<()> {
+        instructions::transfer_hook::transfer_hook_execute_handler(ctx, amount)
+    }
+
     /// Deposit SOL during bonding phase
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         instructions::deposit::handler(ctx, amount)
@@ -42,8 +71,8 @@ pub mod sovereign_liquidity {
     }
 
     /// Finalize sovereign after bond target is met
-    /// Creates Whirlpool, adds liquidity, mints NFTs
-    pub fn finalize(ctx: Context<Finalize>) -> Result<()> {
+    /// Creates SAMM pool, adds liquidity, mints NFTs
+    pub fn finalize<'info>(ctx: Context<'_, '_, 'info, 'info, Finalize<'info>>) -> Result<()> {
         instructions::finalize::handler(ctx)
     }
 
@@ -54,8 +83,8 @@ pub mod sovereign_liquidity {
 
     // ============ Fee Management ============
     
-    /// Collect fees from Whirlpool position
-    pub fn claim_fees(ctx: Context<ClaimFees>) -> Result<()> {
+    /// Collect fees from SAMM position
+    pub fn claim_fees<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> Result<()> {
         instructions::claim_fees::handler(ctx)
     }
 
@@ -67,6 +96,14 @@ pub mod sovereign_liquidity {
     /// Creator withdraws earned fees
     pub fn withdraw_creator_fees(ctx: Context<WithdrawCreatorFees>) -> Result<()> {
         instructions::claim_fees::withdraw_creator_fees_handler(ctx)
+    }
+
+    /// Harvest withheld transfer fees from Token-2022 token accounts
+    /// Fees are collected from TransferFeeConfig extension
+    pub fn harvest_transfer_fees<'info>(
+        ctx: Context<'_, '_, 'info, 'info, HarvestTransferFees<'info>>,
+    ) -> Result<()> {
+        instructions::claim_fees::harvest_transfer_fees_handler(ctx)
     }
 
     // ============ Governance ============
@@ -87,7 +124,7 @@ pub mod sovereign_liquidity {
     }
 
     /// Execute unwind after proposal passes
-    pub fn execute_unwind(ctx: Context<ExecuteUnwind>) -> Result<()> {
+    pub fn execute_unwind<'info>(ctx: Context<'_, '_, 'info, 'info, ExecuteUnwind<'info>>) -> Result<()> {
         instructions::governance::execute_unwind_handler(ctx)
     }
 
@@ -170,5 +207,18 @@ pub mod sovereign_liquidity {
     /// Pause/unpause protocol (emergency)
     pub fn set_protocol_paused(ctx: Context<SetProtocolPaused>, paused: bool) -> Result<()> {
         instructions::admin::set_protocol_paused_handler(ctx, paused)
+    }
+
+    // ============ Sell Fee Management (TokenLaunch) ============
+    
+    /// Lower the sell fee (can only decrease, never increase)
+    pub fn update_sell_fee(ctx: Context<UpdateSellFee>, new_fee_bps: u16) -> Result<()> {
+        instructions::admin::update_sell_fee_handler(ctx, new_fee_bps)
+    }
+
+    /// Permanently renounce sell fee control (sets to 0%, irreversible)
+    /// Only after recovery is complete (or anytime for FairLaunch mode)
+    pub fn renounce_sell_fee(ctx: Context<RenounceSellFee>) -> Result<()> {
+        instructions::admin::renounce_sell_fee_handler(ctx)
     }
 }

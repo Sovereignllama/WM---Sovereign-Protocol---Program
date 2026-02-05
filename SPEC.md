@@ -1,8 +1,8 @@
 # Sovereign Liquidity Protocol - Solana Technical Specification
 
-**Version:** 1.2  
-**Chain:** Solana  
-**DEX:** Forked Orca Whirlpools (with LP restriction)  
+**Version:** 1.3  
+**Chain:** Gorbagana (Solana fork)  
+**DEX:** Trashbin SAMM (Raydium CLMM fork)  
 **Framework:** Anchor  
 **Last Updated:** January 2026
 
@@ -103,7 +103,7 @@ SLP supports two ways to bootstrap liquidity:
 │              ▼                                                          │
 │  ╔═══════════════════════════════════════════════════════════════════╗  │
 │  ║  3. FINALIZATION                                                   ║  │
-│  ║     • Create Orca Whirlpool with SOL + Tokens                     ║  │
+│  ║     • Create Trashbin SAMM pool with GOR + Tokens                 ║  │
 │  ║     • Mint Genesis NFTs to INVESTORS ONLY (not creator)          ║  │
 │  ║     • NFT tracks: deposit amount, share %, fees claimed           ║  │
 │  ║     • Enter RECOVERY PHASE                                        ║  │
@@ -275,10 +275,10 @@ EVM Architecture                          Solana Architecture
 
 ### Sovereign
 
-A fundraising period where depositors bond SOL with creator-supplied tokens to form an Orca Whirlpool fork liquidity position. Each sovereign creates:
+A fundraising period where depositors bond GOR with creator-supplied tokens to form a Trashbin SAMM (Raydium CLMM) liquidity position. Each sovereign creates:
 - A **SovereignState** PDA holding configuration and totals
 - Multiple **DepositRecord** PDAs (one per depositor)
-- A **Position** account (Orca Whirlpool Position NFT)
+- A **PersonalPositionState** account (Raydium CLMM Position NFT)
 - Genesis NFTs for each depositor
 
 ### Sovereign Types
@@ -390,7 +390,7 @@ A PDA tracking the creator's token supply deposit and optional token purchase:
 
 ### Permanent Lock
 
-A PDA that controls the Orca Whirlpool position NFT:
+A PDA that controls the Trashbin SAMM position NFT:
 - Holds the position NFT as permanent delegate
 - Allows fee collection only
 - **During Recovery**: LP locked, can be unwound via governance or low volume
@@ -502,31 +502,43 @@ sovereign_liquidity/
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Orca Whirlpools Integration
+### Trashbin SAMM Integration
 
-The protocol integrates with **Orca Whirlpools** (concentrated liquidity AMM):
+The protocol integrates with **Trashbin SAMM** (Raydium CLMM fork on Gorbagana):
+
+**Program ID:** `WTzkPUoprVx7PDc1tfKA5sS7k1ynCgU89WtwZhksHX5`
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Sovereign Finalization                               │
 │                                                                      │
-│  1. Calculate SOL/Token amounts for LP                              │
-│  2. CPI to Whirlpool: open_position()                               │
-│  3. CPI to Whirlpool: increase_liquidity()                          │
+│  1. Calculate GOR/Token amounts for LP                              │
+│  2. CPI to SAMM: open_position_v2()                                 │
+│  3. CPI to SAMM: increase_liquidity_v2()                            │
 │  4. Store position NFT in PermanentLock PDA                         │
 │  5. Mint Genesis NFTs to depositors                                 │
+│  6. CPI to SAMM: set_pool_status(bit0=1) - disable external LPs    │
 │                                                                      │
 │                              │                                       │
 │                              ▼                                       │
 │  ┌─────────────────────────────────────────────────────────────┐   │
-│  │                    Orca Whirlpool                            │   │
+│  │                    Trashbin SAMM Pool                        │   │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │   │
-│  │  │ Position NFT│  │  Whirlpool  │  │  TickArray  │         │   │
-│  │  │ (locked)    │  │   State     │  │             │         │   │
+│  │  │ Position NFT│  │  PoolState  │  │  TickArray  │         │   │
+│  │  │ (locked)    │  │ (1544 bytes)│  │ (4483 bytes)│         │   │
 │  │  └─────────────┘  └─────────────┘  └─────────────┘         │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+**Pool Status Bits (Native LP Restriction):**
+| Bit | Name | Effect when set to 1 |
+|-----|------|----------------------|
+| 0 | OpenPositionOrIncreaseLiquidity | Disables new positions & adding liquidity |
+| 1 | DecreaseLiquidity | Disables removing liquidity |
+| 2 | CollectFee | Disables fee collection |
+| 3 | CollectReward | Disables reward collection |
+| 4 | Swap | Disables swaps |
 
 ### Fee Collection Flow
 
@@ -535,7 +547,7 @@ The protocol integrates with **Orca Whirlpools** (concentrated liquidity AMM):
 │                     Fee Collection (claim_fees)                      │
 │                                                                      │
 │  1. Verify caller owns Genesis NFT                                  │
-│  2. CPI to Whirlpool: collect_fees() on position                    │
+│  2. CPI to SAMM: decrease_liquidity_v2(0) to collect fees           │
 │  3. Calculate claimable share based on NFT shares                   │
 │  4. Transfer SOL fees to caller                                     │
 │  5. Transfer token fees to caller                                   │
@@ -565,7 +577,7 @@ The protocol integrates with **Orca Whirlpools** (concentrated liquidity AMM):
 | Liquidity Range | Full Range | Always MIN_TICK to MAX_TICK for fair deep liquidity |
 | Auto-Unwind Period | 90-365 days (protocol) | Protocol sets inactivity threshold for auto-unwind |
 | Activity Check Cooldown | 7 days | Wait period after cancelled check before new initiation |
-| Tick Spacing | Pool default | Orca Whirlpool tick spacing (determines fee tier) |
+| Tick Spacing | Pool default | Raydium CLMM tick spacing (determines fee tier) |
 
 ### Fee Configuration (Creator Set at Launch)
 
@@ -792,8 +804,8 @@ pub struct SovereignState {
     
     // Derived accounts
     pub permanent_lock: Pubkey,
-    pub whirlpool: Pubkey,           // Orca Whirlpool
-    pub position_mint: Pubkey,       // Orca Position NFT mint
+    pub pool_state: Pubkey,          // Trashbin SAMM PoolState
+    pub position_mint: Pubkey,       // Raydium CLMM Position NFT mint
     
     // Unwind state
     pub unwind_sol_balance: u64,
@@ -864,8 +876,8 @@ pub struct CreatorFeeTracker {
 #[account]
 pub struct PermanentLock {
     pub sovereign: Pubkey,              // Associated sovereign
-    pub whirlpool: Pubkey,           // Orca Whirlpool
-    pub position: Pubkey,            // Orca Position account
+    pub pool_state: Pubkey,          // Trashbin SAMM PoolState
+    pub position: Pubkey,            // Raydium CLMM PersonalPositionState
     pub tick_lower: i32,             // Always MIN_TICK (full range)
     pub tick_upper: i32,             // Always MAX_TICK (full range)
     pub liquidity: u128,             // Position liquidity
@@ -1165,21 +1177,21 @@ pub fn finalize(ctx: Context<Finalize>) -> Result<()> {
         sovereign.creation_fee_escrowed = 0;
     }
     
-    // STEP 1: Create LP with INVESTOR SOL + CREATOR TOKENS
-    // All investor SOL goes to LP (no deductions)
-    let sol_for_lp = sovereign.total_deposited;  // 100% of investor SOL
+    // STEP 1: Create LP with INVESTOR GOR + CREATOR TOKENS
+    // All investor GOR goes to LP (no deductions)
+    let gor_for_lp = sovereign.total_deposited;  // 100% of investor GOR
     let tokens_for_lp = ctx.accounts.token_vault.amount;  // 100% of creator's tokens
     
-    // CPI: Create Orca Whirlpool FULL RANGE position
+    // CPI: Create Trashbin SAMM FULL RANGE position
     // Full range = tick_lower: MIN_TICK, tick_upper: MAX_TICK
     // This ensures deep, fair, equal liquidity across all prices
     let tick_lower = MIN_TICK; // -443636 for most pools
     let tick_upper = MAX_TICK; // +443636 for most pools
     
-    // CPI: open_position with full range ticks
-    // CPI: increase_liquidity with SOL + Tokens
+    // CPI: open_position_v2 with full range ticks
+    // CPI: increase_liquidity_v2 with GOR + Tokens
     // Store position NFT in PermanentLock
-    // Pool is created with restricted = true (only Genesis position can LP)
+    // CPI: set_pool_status(bit0=1) to disable external LPs
     
     // STEP 2: Mint Genesis NFTs to INVESTORS ONLY (not creator)
     for deposit_record in deposit_records {
@@ -1200,11 +1212,11 @@ pub fn finalize(ctx: Context<Finalize>) -> Result<()> {
         let expected_tokens = sovereign.creator_escrow * theoretical_price;
         let min_tokens_out = expected_tokens * 99 / 100; // 1% slippage tolerance
         
-        // CPI: Swap creator's escrowed SOL for tokens via Whirlpool
-        let tokens_bought = swap_sol_for_tokens_with_slippage(
+        // CPI: Swap creator's escrowed GOR for tokens via Trashbin SAMM
+        let tokens_bought = swap_gor_for_tokens_with_slippage(
             sovereign.creator_escrow,
             min_tokens_out,
-            &ctx.accounts.whirlpool
+            &ctx.accounts.pool_state
         )?;
         
         require!(tokens_bought >= min_tokens_out, SlippageExceeded);
@@ -1227,7 +1239,7 @@ pub fn finalize(ctx: Context<Finalize>) -> Result<()> {
     sovereign.last_activity_timestamp = Clock::get()?.unix_timestamp;
     
     emit!(SovereignFinalized { 
-        pool_id: sovereign.whirlpool, 
+        pool_id: sovereign.pool_state, 
         liquidity,
         recovery_target: sovereign.recovery_target  // Investor deposits only
     });
@@ -1497,8 +1509,9 @@ pub fn claim_fees(ctx: Context<ClaimFees>) -> Result<()> {
         NotNFTOwner
     );
     
-    // CPI: Collect fees from Orca position
-    let (sol_collected, tokens_collected) = collect_whirlpool_fees(&ctx)?;
+    // CPI: Collect fees from Trashbin SAMM position
+    // Raydium CLMM: call decrease_liquidity_v2 with liquidity_delta=0 to collect fees
+    let (gor_collected, tokens_collected) = collect_samm_fees(&ctx)?;;
     
     // Investors get 100% of fees in ALL phases (Recovery AND Active)
     let sol_share = sol_collected * deposit.shares_bps as u64 / 10000;
@@ -1521,8 +1534,8 @@ pub fn claim_fees(ctx: Context<ClaimFees>) -> Result<()> {
             sovereign.state = SovereignStatus::Active;
             
             // UNLOCK POOL for external LPs
-            // CPI: Call unlock_pool() on forked Whirlpool
-            unlock_whirlpool(&ctx.accounts.whirlpool, &ctx.accounts.permanent_lock)?;
+            // CPI: Call set_pool_status(bit0=0) on Trashbin SAMM to enable new positions
+            unlock_samm_pool(&ctx.accounts.pool_state, &ctx.accounts.permanent_lock)?;;
             
             emit!(RecoveryComplete { 
                 sovereign_id: sovereign.sovereign_id,
@@ -1531,7 +1544,7 @@ pub fn claim_fees(ctx: Context<ClaimFees>) -> Result<()> {
             
             emit!(PoolUnlocked {
                 sovereign: sovereign.key(),
-                whirlpool: sovereign.whirlpool,
+                pool_state: sovereign.pool_state,
                 timestamp: Clock::get()?.unix_timestamp,
             });
         }
@@ -1695,11 +1708,11 @@ pub fn execute_unwind(ctx: Context<ExecuteUnwind>) -> Result<()> {
     proposal.executed = true;
     sovereign.state = SovereignStatus::Unwound;
     
-    // CPI: Decrease liquidity from Whirlpool (decrease_liquidity)
+    // CPI: Decrease liquidity from Trashbin SAMM (decrease_liquidity_v2)
     // CPI: Close position (close_position)
     
     // Store assets for claiming
-    // SOL goes to investors proportionally
+    // GOR goes to investors proportionally
     // Tokens go back to creator
     sovereign.unwind_sol_balance = /* SOL from LP */;
     sovereign.unwind_token_balance = /* Tokens from LP */;
@@ -1779,7 +1792,7 @@ activity check mechanism detects prolonged inactivity and triggers auto-unwind.
 
 **Design: Cumulative Fee Growth Snapshots**
 
-Orca Whirlpools track `fee_growth_global_a` and `fee_growth_global_b` at the pool level - these
+Raydium CLMM (Trashbin SAMM) tracks `fee_growth_global_0_x64` and `fee_growth_global_1_x64` at the pool level - these
 are cumulative values that never decrease. This allows us to measure actual trading activity
 without requiring frequent checks.
 
@@ -1841,7 +1854,7 @@ without requiring frequent checks.
 /// Takes a snapshot of current cumulative fee growth
 pub fn initiate_activity_check(ctx: Context<InitiateActivityCheck>) -> Result<()> {
     let sovereign = &mut ctx.accounts.sovereign;
-    let whirlpool = &ctx.accounts.whirlpool;
+    let pool_state = &ctx.accounts.pool_state;
     let protocol = &ctx.accounts.protocol_state;
     
     // Only valid in Active phase
@@ -1858,8 +1871,8 @@ pub fn initiate_activity_check(ctx: Context<InitiateActivityCheck>) -> Result<()
     }
     
     // Take snapshot of cumulative fee growth (never decreases)
-    sovereign.fee_growth_snapshot_a = whirlpool.fee_growth_global_a;
-    sovereign.fee_growth_snapshot_b = whirlpool.fee_growth_global_b;
+    sovereign.fee_growth_snapshot_a = pool_state.fee_growth_global_0_x64;
+    sovereign.fee_growth_snapshot_b = pool_state.fee_growth_global_1_x64;
     sovereign.activity_check_timestamp = now;
     sovereign.activity_check_initiated = true;
     
@@ -1877,7 +1890,7 @@ pub fn initiate_activity_check(ctx: Context<InitiateActivityCheck>) -> Result<()
 /// Compares fee growth to threshold and triggers unwind if inactive
 pub fn execute_activity_check(ctx: Context<ExecuteActivityCheck>) -> Result<()> {
     let sovereign = &mut ctx.accounts.sovereign;
-    let whirlpool = &ctx.accounts.whirlpool;
+    let pool_state = &ctx.accounts.pool_state;
     let protocol = &ctx.accounts.protocol_state;
     
     // Must have an active check in progress
@@ -1890,10 +1903,10 @@ pub fn execute_activity_check(ctx: Context<ExecuteActivityCheck>) -> Result<()> 
     require!(elapsed >= protocol.auto_unwind_period, ActivityCheckTooEarly);
     
     // Calculate fee growth since snapshot
-    let growth_a = whirlpool.fee_growth_global_a
+    let growth_a = pool_state.fee_growth_global_0_x64
         .checked_sub(sovereign.fee_growth_snapshot_a)
         .unwrap_or(0);
-    let growth_b = whirlpool.fee_growth_global_b
+    let growth_b = pool_state.fee_growth_global_1_x64
         .checked_sub(sovereign.fee_growth_snapshot_b)
         .unwrap_or(0);
     
@@ -1905,7 +1918,7 @@ pub fn execute_activity_check(ctx: Context<ExecuteActivityCheck>) -> Result<()> 
         // INSUFFICIENT ACTIVITY → TRIGGER AUTO-UNWIND
         sovereign.state = SovereignStatus::Unwound;
         
-        // CPI: Remove liquidity from Whirlpool
+        // CPI: Remove liquidity from SAMM pool
         // Store SOL and tokens for claiming
         // Deduct unwind fee
         
@@ -2075,11 +2088,11 @@ pub struct UpdateFeesParams {
 All instructions MUST validate:
 
 ```rust
-// 1. Correct Whirlpool for sovereign
-constraint = sovereign.whirlpool == whirlpool.key() @ InvalidPool
+// 1. Correct Pool for sovereign
+constraint = sovereign.pool_state == pool_state.key() @ InvalidPool
 
 // 2. Correct program IDs for CPI
-constraint = whirlpool_program.key() == WHIRLPOOL_PROGRAM_ID @ InvalidProgram
+constraint = samm_program.key() == TRASHBIN_SAMM_PROGRAM_ID @ InvalidProgram
 
 // 3. State checks
 constraint = sovereign.state == expected_state @ InvalidState
@@ -2116,15 +2129,15 @@ Before removing liquidity during unwind, ALWAYS collect pending fees:
 
 ```rust
 pub fn execute_unwind_internal(ctx: Context<...>) -> Result<()> {
-    // STEP 1: Collect any pending fees from Whirlpool
-    let (pending_sol, pending_tokens) = collect_whirlpool_fees(&ctx)?;
+    // STEP 1: Collect any pending fees from SAMM pool
+    let (pending_sol, pending_tokens) = collect_samm_fees(&ctx);
     
     // Add to existing collected fees for distribution
     sovereign.total_sol_fees_collected += pending_sol;
     sovereign.total_token_fees_collected += pending_tokens;
     
     // STEP 2: Remove liquidity
-    let (sol_from_lp, tokens_from_lp) = remove_whirlpool_liquidity(&ctx)?;
+    let (sol_from_lp, tokens_from_lp) = remove_samm_liquidity(&ctx);;
     
     // STEP 3: Calculate distributions
     // ...
@@ -2147,9 +2160,9 @@ require!(amount >= MIN_DEPOSIT_LAMPORTS, DepositTooSmall);
 ```rust
 // Always validate CPI target programs
 #[account(
-    constraint = whirlpool_program.key() == WHIRLPOOL_PROGRAM_ID
+    constraint = samm_program.key() == TRASHBIN_SAMM_PROGRAM_ID
 )]
-pub whirlpool_program: Program<'info, Whirlpool>,
+pub samm_program: Program<'info, TrashbinSamm>,
 
 // Use seeds for PDA signing
 let seeds = &[
@@ -2369,42 +2382,54 @@ fn determine_fee_recipient(config: &SovereignTokenConfig) -> Result<Pubkey> {
 
 ## Appendix A: External Dependencies
 
-### Forked Orca Whirlpools
+### Trashbin SAMM (Raydium CLMM Fork)
 
-We deploy a **forked version** of Orca Whirlpools with LP restriction support:
+We integrate with **Trashbin SAMM**, an exact fork of Raydium CLMM deployed on Gorbagana:
 
 | Program | Address |
 |---------|---------|
-| SLP Whirlpool Program | `TBD (our deployed fork)` |
-| Original Whirlpool | `whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc` |
+| Trashbin SAMM Program | `WTzkPUoprVx7PDc1tfKA5sS7k1ynCgU89WtwZhksHX5` |
+| Original Raydium CLMM | `CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK` |
 
-**Fork Modifications:**
+**Key Features:**
+- Autonomous, non-upgradeable program
+- Token-2022 first-class support
+- Native pool status bits for LP restriction
+
+**Pool Status Bits (for LP Restriction):**
 ```rust
-// Added to WhirlpoolState
-pub restricted: bool,        // If true, only owner can add liquidity
-pub restriction_owner: Pubkey, // PDA that controls restriction
+// PoolState.status field bit flags
+bit0: OpenPositionOrIncreaseLiquidity  // SET to disable new LPs!
+bit1: DecreaseLiquidity
+bit2: CollectFee  
+bit3: CollectReward
+bit4: Swap
 
-// Modified open_position / increase_liquidity
-if whirlpool.restricted {
-    require!(
-        signer == whirlpool.restriction_owner,
-        ErrorCode::PoolRestricted
-    );
-}
+// To restrict pool during recovery:
+pool_state.status = 0b00001;  // Only bit0 set - blocks new positions
 
-// New instruction: unlock_pool
-pub fn unlock_pool(ctx: Context<UnlockPool>) -> Result<()> {
-    require!(ctx.accounts.signer.key() == ctx.accounts.whirlpool.restriction_owner);
-    ctx.accounts.whirlpool.restricted = false;
-    Ok(())
-}
+// On recovery complete:
+pool_state.status = 0b00000;  // All bits clear - pool open
 ```
 
+**Account Sizes (verified on-chain):**
+| Account | Size (bytes) |
+|---------|--------------|
+| PoolState | 1,544 |
+| TickArrayState | 4,483 |
+| ObservationState | 1,832 |
+| ProtocolPositionState | 137 |
+| PersonalPositionState | 177 |
+
+**IDL Source:**
+- GitHub: `https://github.com/raydium-io/raydium-clmm/blob/master/idl/amm.json`
+
 **Pool Lifecycle:**
-1. Pool created with `restricted = true`
-2. Only Genesis position (via protocol PDA) can provide liquidity
-3. On recovery complete: `unlock_pool()` called
-4. Pool becomes open - anyone can LP
+1. Pool created via `create_pool` - status bits clear
+2. Genesis position opened via `open_position_v2`
+3. Before recovery: set `pool_state.status = 0b00001` (blocks new LPs)
+4. On recovery complete: call admin instruction to set `status = 0`
+5. Pool becomes open - anyone can LP
 
 ### Metaplex
 
@@ -2537,7 +2562,7 @@ pub struct RecoveryComplete {
 #[event]
 pub struct PoolUnlocked {
     pub sovereign: Pubkey,
-    pub whirlpool: Pubkey,
+    pub pool_state: Pubkey,
     pub timestamp: i64,
 }
 ```
@@ -2772,7 +2797,7 @@ pub enum SovereignError {
     AlreadyRenounced,
     
     // Validation Errors
-    #[msg("Invalid pool - does not match sovereign's whirlpool")]
+    #[msg("Invalid pool - does not match sovereign's pool_state")]
     InvalidPool,
     
     #[msg("Invalid program ID for CPI")]
@@ -2857,13 +2882,13 @@ pub enum SovereignError {
 |-----------|-------------|-------|
 | create_sovereign | ~100,000 | Multiple account inits |
 | deposit | ~30,000 | Simple transfer + PDA update |
-| finalize | ~250,000 | CPI to Whirlpool + NFT mints |
-| claim_fees | ~100,000 | CPI to Whirlpool + transfers |
+| finalize | ~250,000 | CPI to SAMM + NFT mints |
+| claim_fees | ~100,000 | CPI to SAMM + transfers |
 | vote | ~20,000 | Simple PDA updates |
 | execute_unwind | ~200,000 | CPI to close position |
 | update_protocol_fees | ~15,000 | Simple PDA update |
-| initiate_activity_check | ~25,000 | Read Whirlpool + update PDA |
-| execute_activity_check | ~200,000 | Read Whirlpool + potential CPI |
+| initiate_activity_check | ~25,000 | Read PoolState + update PDA |
+| execute_activity_check | ~200,000 | Read PoolState + potential CPI |
 | update_fee_threshold | ~15,000 | Simple PDA update |
 | renounce_fee_threshold | ~10,000 | Simple flag update |
 
@@ -2944,14 +2969,14 @@ pub enum SovereignError {
 
 ### Version 1.1 (January 2026)
 - Two-call activity check for Active phase auto-unwind
-- Cumulative fee growth snapshots from Orca Whirlpools
+- Cumulative fee growth snapshots from Trashbin SAMM (Raydium CLMM)
 - Protocol-adjustable fee growth threshold with renounce option
 - Permissionless initiate and execute activity check
 
 ### Version 1.0 (January 2026)
-- Initial Solana specification
+- Initial Gorbagana specification
 - Anchor framework with PDAs
-- Orca Whirlpools integration (forked)
+- Trashbin SAMM (Raydium CLMM) integration
 - Metaplex Genesis NFTs
 - Token-2022 transfer hooks for Token Launcher
 - Governance with timelock

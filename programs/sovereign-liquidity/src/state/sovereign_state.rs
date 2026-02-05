@@ -125,8 +125,8 @@ pub struct SovereignState {
     // POOL INFORMATION
     // ============================================================
     
-    /// Whirlpool address (set on finalization)
-    pub whirlpool: Pubkey,
+    /// Trashbin SAMM PoolState address (set on finalization)
+    pub pool_state: Pubkey,
     
     /// Position NFT mint (held by PermanentLock)
     pub position_mint: Pubkey,
@@ -256,7 +256,7 @@ impl SovereignState {
         + 1   // fee_mode
         + 1   // fee_control_renounced
         + 8   // creation_fee_escrowed
-        + 32  // whirlpool
+        + 32  // pool_state
         + 32  // position_mint
         + 1   // pool_restricted
         + 8   // recovery_target

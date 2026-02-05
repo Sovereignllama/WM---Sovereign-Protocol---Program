@@ -4,6 +4,7 @@ use crate::state::*;
 use crate::constants::*;
 use crate::errors::SovereignError;
 use crate::events::{ProposalCreated, VoteCast, ProposalFinalized, UnwindExecuted, UnwindClaimed};
+use crate::samm::{instructions as samm_ix, cpi as samm_cpi};
 
 /// Create an unwind proposal
 #[derive(Accounts)]
@@ -288,16 +289,16 @@ pub struct ExecuteUnwind<'info> {
     )]
     pub token_mint: Account<'info, Mint>,
     
-    /// CHECK: Whirlpool position - MUST match permanent_lock.position_mint
+    /// CHECK: SAMM position - MUST match permanent_lock.position_mint
     #[account(
         mut,
         constraint = position.key() == permanent_lock.position_mint @ SovereignError::InvalidPosition
     )]
     pub position: UncheckedAccount<'info>,
     
-    /// CHECK: Whirlpool program
-    #[account(address = WHIRLPOOL_PROGRAM_ID)]
-    pub whirlpool_program: UncheckedAccount<'info>,
+    /// CHECK: Trashbin SAMM program
+    #[account(address = SAMM_PROGRAM_ID)]
+    pub samm_program: UncheckedAccount<'info>,
     
     /// Vault to receive removed liquidity
     /// CHECK: PDA vault
@@ -319,8 +320,9 @@ pub struct ExecuteUnwind<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn execute_unwind_handler(ctx: Context<ExecuteUnwind>) -> Result<()> {
+pub fn execute_unwind_handler<'info>(ctx: Context<'_, '_, 'info, 'info, ExecuteUnwind<'info>>) -> Result<()> {
     let sovereign = &mut ctx.accounts.sovereign;
+    let permanent_lock = &ctx.accounts.permanent_lock;
     let clock = Clock::get()?;
     
     // Validate state
@@ -329,28 +331,96 @@ pub fn execute_unwind_handler(ctx: Context<ExecuteUnwind>) -> Result<()> {
         SovereignError::InvalidState
     );
     
-    // ============ Whirlpool Liquidity Removal ============
-    // CPI to Whirlpool to:
-    // 1. Remove all liquidity from position
-    // 2. Collect any remaining fees
-    // 3. Close position
+    // ============ Trashbin SAMM Liquidity Removal ============
+    // CPI to SAMM to:
+    // 1. Remove all liquidity from position (decrease_liquidity_v2)
+    // 2. SOL goes to sol_vault, tokens go to token_vault
+    //
+    // Required remaining_accounts order:
+    // [0] nft_account - Position NFT token account
+    // [1] personal_position - Personal position state (writable)
+    // [2] pool_state - Pool state (writable)
+    // [3] protocol_position - Protocol position state (writable)
+    // [4] token_vault_0 - Pool token vault A (writable)
+    // [5] token_vault_1 - Pool token vault B (writable)
+    // [6] tick_array_lower - Lower tick array (writable)
+    // [7] tick_array_upper - Upper tick array (writable)
+    // [8] recipient_token_account_0 - Destination for SOL/WGOR (writable)
+    // [9] recipient_token_account_1 - Destination for tokens (writable)
+    // [10] token_program_2022 - Token 2022 program (optional)
+    // [11] memo_program - Memo program (optional)
+    // [12] vault_0_mint - Vault 0 mint
+    // [13] vault_1_mint - Vault 1 mint
     
-    // SOL from LP goes to sol_vault for distribution
-    // Tokens from LP go to token_vault for distribution
-    
-    // Calculate per-depositor shares
-    // Each depositor gets: (their_deposit / total_deposited) * total_liquidity_value
+    let (sol_amount, token_amount) = if ctx.remaining_accounts.len() >= 14 {
+        // SECURITY: Validate pool_state matches the permanent_lock's stored pool_state
+        // This prevents attackers from passing arbitrary pool accounts
+        require!(
+            ctx.remaining_accounts[2].key() == ctx.accounts.permanent_lock.pool_state,
+            SovereignError::InvalidPool
+        );
+        
+        msg!("Executing unwind via SAMM CPI - removing all liquidity...");
+        
+        // Build decrease_liquidity_v2 accounts (with full liquidity for unwind)
+        let decrease_accounts = samm_ix::DecreaseLiquidityV2Accounts {
+            nft_owner: ctx.accounts.permanent_lock.to_account_info(),
+            nft_account: ctx.remaining_accounts[0].clone(),
+            personal_position: ctx.remaining_accounts[1].clone(),
+            pool_state: ctx.remaining_accounts[2].clone(),
+            protocol_position: ctx.remaining_accounts[3].clone(),
+            token_vault_0: ctx.remaining_accounts[4].clone(),
+            token_vault_1: ctx.remaining_accounts[5].clone(),
+            tick_array_lower: ctx.remaining_accounts[6].clone(),
+            tick_array_upper: ctx.remaining_accounts[7].clone(),
+            recipient_token_account_0: ctx.remaining_accounts[8].clone(),
+            recipient_token_account_1: ctx.remaining_accounts[9].clone(),
+            token_program: ctx.accounts.token_program.to_account_info(),
+            token_program_2022: ctx.remaining_accounts[10].clone(),
+            memo_program: ctx.remaining_accounts[11].clone(),
+            vault_0_mint: ctx.remaining_accounts[12].clone(),
+            vault_1_mint: ctx.remaining_accounts[13].clone(),
+        };
+        
+        // Use permanent_lock as signer (it owns the position NFT)
+        let sovereign_key = sovereign.key();
+        let lock_seeds = &[
+            PERMANENT_LOCK_SEED,
+            sovereign_key.as_ref(),
+            &[permanent_lock.bump],
+        ];
+        let lock_signer_seeds = &[&lock_seeds[..]];
+        
+        // CPI: Remove ALL liquidity
+        let result = samm_cpi::remove_liquidity(
+            &ctx.accounts.samm_program.to_account_info(),
+            decrease_accounts,
+            permanent_lock.liquidity,
+            0, // Min amount 0 for unwind (accept any amount)
+            0, // Min amount 0 for unwind
+            lock_signer_seeds,
+        )?;
+        
+        msg!("Liquidity removed - SOL: {}, Token: {}", result.amount_0, result.amount_1);
+        
+        (result.amount_0, result.amount_1)
+    } else {
+        // Simplified flow without SAMM CPI (test mode)
+        msg!("SAMM accounts not provided - skipping CPI (test mode)");
+        (0u64, 0u64)
+    };
     
     // Mark unwind as executed
     sovereign.state = SovereignStatus::Unwound;
     sovereign.unwound_at = Some(clock.unix_timestamp);
+    sovereign.unwind_sol_balance = sol_amount;
+    sovereign.unwind_token_balance = token_amount;
     
     emit!(UnwindExecuted {
         sovereign_id: sovereign.sovereign_id,
         executed_at: clock.unix_timestamp,
-        // sol_amount and token_amount would come from Whirlpool CPI
-        sol_amount: 0,
-        token_amount: 0,
+        sol_amount,
+        token_amount,
     });
     
     Ok(())
