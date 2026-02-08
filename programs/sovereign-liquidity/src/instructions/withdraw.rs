@@ -78,38 +78,36 @@ pub fn handler(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
         SovereignError::CreatorCannotWithdrawDuringBonding
     );
     
-    // Transfer SOL from vault to depositor using PDA signature
+    // Transfer SOL from vault to depositor using System Program CPI with PDA signer
     let sovereign_key = sovereign.key();
-    let seeds = &[
+    let vault_seeds: &[&[u8]] = &[
         SOL_VAULT_SEED,
         sovereign_key.as_ref(),
         &[ctx.bumps.sol_vault],
     ];
-    let _signer_seeds = &[&seeds[..]];
     
     // Safe transfer: ensure vault maintains rent exemption
-    let vault_info = ctx.accounts.sol_vault.to_account_info();
-    let depositor_info = ctx.accounts.depositor.to_account_info();
     let rent = Rent::get()?;
     let min_rent = rent.minimum_balance(0);
     
     // Ensure vault retains minimum rent-exempt balance
-    let available_balance = vault_info.lamports().saturating_sub(min_rent);
+    let available_balance = ctx.accounts.sol_vault.lamports().saturating_sub(min_rent);
     require!(
         available_balance >= amount,
         SovereignError::InsufficientVaultBalance
     );
     
-    // Perform atomic transfer with checked arithmetic
-    let vault_current = vault_info.lamports();
-    let depositor_current = depositor_info.lamports();
-    
-    **vault_info.try_borrow_mut_lamports()? = vault_current
-        .checked_sub(amount)
-        .ok_or(SovereignError::InsufficientVaultBalance)?;
-    **depositor_info.try_borrow_mut_lamports()? = depositor_current
-        .checked_add(amount)
-        .ok_or(SovereignError::Overflow)?;
+    anchor_lang::system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            anchor_lang::system_program::Transfer {
+                from: ctx.accounts.sol_vault.to_account_info(),
+                to: ctx.accounts.depositor.to_account_info(),
+            },
+            &[vault_seeds],
+        ),
+        amount,
+    )?;
     
     // Update deposit record
     deposit_record.amount = deposit_record.amount.checked_sub(amount).unwrap();

@@ -59,7 +59,7 @@ pub struct TransferHookExecute<'info> {
     /// Destination token account
     pub destination: InterfaceAccount<'info, TokenAccount>,
     
-    /// Source token account authority (owner)
+    /// CHECK: Source token account authority, validated by Token-2022 transfer hook interface
     pub authority: AccountInfo<'info>,
     
     /// Extra account metas PDA

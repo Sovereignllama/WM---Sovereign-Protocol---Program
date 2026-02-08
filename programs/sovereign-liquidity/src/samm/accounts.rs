@@ -517,8 +517,8 @@ impl SammAccountDeserialize for PersonalPositionState {
     }
     
     fn discriminator() -> [u8; 8] {
-        // Raydium CLMM PersonalPositionState discriminator
-        [65, 160, 103, 121, 128, 171, 106, 95]
+        // Trashbin SAMM PersonalPositionState discriminator
+        [70, 111, 150, 126, 230, 15, 25, 117]
     }
 }
 

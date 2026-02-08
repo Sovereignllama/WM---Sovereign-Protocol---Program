@@ -30,6 +30,12 @@ pub struct CreateSovereignParams {
     
     // BYO Token only
     pub deposit_amount: Option<u64>,
+    
+    // SAMM pool configuration
+    /// AMM config account address (determines swap fee tier)
+    pub amm_config: Pubkey,
+    /// Swap fee in basis points (for display/reference, must match amm_config tier)
+    pub swap_fee_bps: u16,
 }
 
 #[derive(Accounts)]
@@ -146,10 +152,16 @@ pub fn handler(ctx: Context<CreateSovereign>, params: CreateSovereignParams) -> 
     sovereign.creator = ctx.accounts.creator.key();
     sovereign.sovereign_type = params.sovereign_type;
     sovereign.state = SovereignStatus::Bonding;
+    sovereign.name = params.name;
+    sovereign.token_name = params.token_name.clone().unwrap_or_default();
+    sovereign.token_symbol = params.token_symbol.clone().unwrap_or_default();
+    sovereign.metadata_uri = params.metadata_uri.clone().unwrap_or_default();
     sovereign.bond_target = params.bond_target;
     sovereign.bond_duration = params.bond_duration;
     sovereign.bond_deadline = clock.unix_timestamp + params.bond_duration;
     sovereign.creation_fee_escrowed = creation_fee;
+    sovereign.amm_config = params.amm_config;
+    sovereign.swap_fee_bps = params.swap_fee_bps;
     sovereign.pool_restricted = true;
     sovereign.created_at = clock.unix_timestamp;
     sovereign.bump = ctx.bumps.sovereign;
@@ -238,6 +250,8 @@ pub fn handler(ctx: Context<CreateSovereign>, params: CreateSovereignParams) -> 
         creation_fee_escrowed: creation_fee,
         sell_fee_bps: sovereign.sell_fee_bps,
         fee_mode: sovereign.fee_mode,
+        amm_config: sovereign.amm_config,
+        swap_fee_bps: sovereign.swap_fee_bps,
     });
     
     Ok(())

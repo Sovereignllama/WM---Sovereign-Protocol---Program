@@ -92,6 +92,7 @@ pub fn open_position_full_range<'info>(
     amount_0_max: u64,
     amount_1_max: u64,
     tick_spacing: i32,
+    base_flag: Option<bool>,
     signer_seeds: &[&[&[u8]]],
 ) -> Result<Pubkey> {
     let args = OpenPositionV2Args::full_range(
@@ -99,16 +100,17 @@ pub fn open_position_full_range<'info>(
         amount_0_max,
         amount_1_max,
         tick_spacing,
+        base_flag,
     );
     
     let account_metas = vec![
         writable_signer(accounts.payer.key()),
-        readonly_signer(accounts.position_nft_owner.key()),
-        writable(accounts.position_nft_mint.key()),
+        readonly(accounts.position_nft_owner.key()),
+        writable_signer(accounts.position_nft_mint.key()),
         writable(accounts.position_nft_account.key()),
-        readonly(accounts.metadata_account.key()),
+        writable(accounts.metadata_account.key()),
         writable(accounts.pool_state.key()),
-        writable(accounts.protocol_position.key()),
+        readonly(accounts.protocol_position.key()),
         writable(accounts.tick_array_lower.key()),
         writable(accounts.tick_array_upper.key()),
         writable(accounts.personal_position.key()),
@@ -124,6 +126,8 @@ pub fn open_position_full_range<'info>(
         readonly(accounts.token_program_2022.key()),
         readonly(accounts.vault_0_mint.key()),
         readonly(accounts.vault_1_mint.key()),
+        // remaining_accounts[0] - bitmap extension required for full-range positions
+        writable(accounts.tick_array_bitmap_extension.key()),
     ];
     
     let ix = Instruction {
@@ -155,6 +159,7 @@ pub fn open_position_full_range<'info>(
         accounts.token_program_2022,
         accounts.vault_0_mint,
         accounts.vault_1_mint,
+        accounts.tick_array_bitmap_extension,
         samm_program.clone(),
     ];
     
@@ -363,6 +368,7 @@ pub fn remove_liquidity<'info>(
         readonly(accounts.memo_program.key()),
         readonly(accounts.vault_0_mint.key()),
         readonly(accounts.vault_1_mint.key()),
+        writable(accounts.tick_array_bitmap_extension.key()),
     ];
     
     let ix = Instruction {
@@ -388,6 +394,7 @@ pub fn remove_liquidity<'info>(
         accounts.memo_program,
         accounts.vault_0_mint,
         accounts.vault_1_mint,
+        accounts.tick_array_bitmap_extension,
         samm_program.clone(),
     ];
     
@@ -622,4 +629,85 @@ pub fn calculate_full_range_liquidity(
     let liquidity_1 = amount_1 as f64 / sqrt_price;
     
     liquidity_0.min(liquidity_1) as u128
+}
+
+// ============================================================
+// CREATE POOL CPI
+// ============================================================
+
+/// Create a new CLMM pool on Trashbin SAMM
+///
+/// This creates the pool state, token vaults, observation state,
+/// and tick array bitmap extension. The pool is initialized with
+/// the given sqrt_price and open_time.
+///
+/// # Arguments
+///
+/// * `samm_program` - SAMM program account
+/// * `accounts` - Required accounts for pool creation
+/// * `sqrt_price_x64` - Initial sqrt price (Q64.64 format)
+/// * `open_time` - Unix timestamp when pool opens for trading
+/// * `signer_seeds` - PDA signer seeds (pool_creator is a PDA)
+pub fn create_pool<'info>(
+    samm_program: &AccountInfo<'info>,
+    accounts: CreatePoolAccounts<'info>,
+    sqrt_price_x64: u128,
+    open_time: u64,
+    signer_seeds: &[&[&[u8]]],
+) -> Result<()> {
+    let args = CreatePoolArgs::new(sqrt_price_x64, open_time);
+
+    let account_metas = vec![
+        writable_signer(accounts.pool_creator.key()),
+        readonly(accounts.amm_config.key()),
+        writable(accounts.pool_state.key()),
+        readonly(accounts.token_mint_0.key()),
+        readonly(accounts.token_mint_1.key()),
+        writable(accounts.token_vault_0.key()),
+        writable(accounts.token_vault_1.key()),
+        writable(accounts.observation_state.key()),
+        writable(accounts.tick_array_bitmap.key()),
+        readonly(accounts.token_program_0.key()),
+        readonly(accounts.token_program_1.key()),
+        readonly(accounts.system_program.key()),
+        readonly(accounts.rent.key()),
+    ];
+
+    let ix = Instruction {
+        program_id: samm_program.key(),
+        accounts: account_metas,
+        data: args.to_instruction_data(),
+    };
+
+    let account_infos = vec![
+        accounts.pool_creator,
+        accounts.amm_config,
+        accounts.pool_state,
+        accounts.token_mint_0,
+        accounts.token_mint_1,
+        accounts.token_vault_0,
+        accounts.token_vault_1,
+        accounts.observation_state,
+        accounts.tick_array_bitmap,
+        accounts.token_program_0,
+        accounts.token_program_1,
+        accounts.system_program,
+        accounts.rent,
+        samm_program.clone(),
+    ];
+
+    invoke_signed(&ix, &account_infos, signer_seeds)?;
+
+    Ok(())
+}
+
+/// Sort two mints into canonical order (lower pubkey first)
+/// Returns (mint_0, mint_1, is_swapped) where is_swapped indicates
+/// if the original order was reversed
+pub fn sort_mints(mint_a: &Pubkey, mint_b: &Pubkey) -> (Pubkey, Pubkey, bool) {
+    if mint_a.to_bytes() < mint_b.to_bytes() {
+        (*mint_a, *mint_b, false)
+    } else {
+        (*mint_b, *mint_a, true)
+    }
 }

@@ -41,25 +41,6 @@ pub mod sovereign_liquidity {
         instructions::create_token::handler(ctx, params)
     }
 
-    // ============ Transfer Hook (Sell Fees) ============
-    
-    /// Initialize extra account metas for transfer hook
-    /// Must be called after create_token to set up the hook
-    pub fn initialize_extra_account_metas(
-        ctx: Context<InitializeExtraAccountMetas>,
-    ) -> Result<()> {
-        instructions::transfer_hook::initialize_extra_account_metas_handler(ctx)
-    }
-    
-    /// Transfer hook execute - called by Token-2022 on every transfer
-    /// Handles sell fee calculation and tracking
-    pub fn transfer_hook_execute(
-        ctx: Context<TransferHookExecute>,
-        amount: u64,
-    ) -> Result<()> {
-        instructions::transfer_hook::transfer_hook_execute_handler(ctx, amount)
-    }
-
     /// Deposit SOL during bonding phase
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         instructions::deposit::handler(ctx, amount)
@@ -70,10 +51,18 @@ pub mod sovereign_liquidity {
         instructions::withdraw::handler(ctx, amount)
     }
 
-    /// Finalize sovereign after bond target is met
-    /// Creates SAMM pool, adds liquidity, mints NFTs
-    pub fn finalize<'info>(ctx: Context<'_, '_, 'info, 'info, Finalize<'info>>) -> Result<()> {
-        instructions::finalize::handler(ctx)
+    /// Finalize sovereign step 1: Create SAMM pool
+    /// Called after bond target is met (state = Finalizing)
+    pub fn finalize_create_pool(ctx: Context<FinalizeCreatePool>) -> Result<()> {
+        instructions::finalize::finalize_create_pool_handler(ctx)
+    }
+
+    /// Finalize sovereign step 2: Add liquidity to SAMM pool
+    /// Called after pool is created (state = PoolCreated)
+    pub fn finalize_add_liquidity<'info>(
+        ctx: Context<'_, '_, 'info, 'info, FinalizeAddLiquidity<'info>>,
+    ) -> Result<()> {
+        instructions::finalize::finalize_add_liquidity_handler(ctx)
     }
 
     /// Mint Genesis NFT to a depositor after finalization
@@ -118,8 +107,10 @@ pub mod sovereign_liquidity {
         instructions::governance::vote_handler(ctx, support)
     }
 
-    /// Finalize voting after period ends
-    pub fn finalize_vote(ctx: Context<FinalizeVote>) -> Result<()> {
+    /// Finalize voting after period ends.
+    /// If passed, snapshots SAMM fee_growth and starts 90-day observation.
+    /// remaining_accounts[0] = pool_state (required when vote passes)
+    pub fn finalize_vote<'info>(ctx: Context<'_, '_, 'info, 'info, FinalizeVote<'info>>) -> Result<()> {
         instructions::governance::finalize_vote_handler(ctx)
     }
 
@@ -133,22 +124,9 @@ pub mod sovereign_liquidity {
         instructions::governance::claim_unwind_handler(ctx)
     }
 
-    // ============ Activity Check ============
-    
-    /// Initiate activity check (90-day countdown)
-    pub fn initiate_activity_check(ctx: Context<InitiateActivityCheck>) -> Result<()> {
-        instructions::activity_check::initiate_activity_check_handler(ctx)
-    }
-
-    /// Creator cancels activity check (proves liveness)
-    pub fn cancel_activity_check(ctx: Context<CancelActivityCheck>) -> Result<()> {
-        instructions::activity_check::cancel_activity_check_handler(ctx)
-    }
-
-    /// Execute activity check after 90 days
-    pub fn execute_activity_check(ctx: Context<ExecuteActivityCheck>) -> Result<()> {
-        instructions::activity_check::execute_activity_check_handler(ctx)
-    }
+    // ============ Activity Check (deprecated — use governance unwind) ============
+    // Activity check instructions removed. Unwind observation is now
+    // integrated into the governance vote flow (finalize_vote + execute_unwind).
 
     // ============ Failed Bonding ============
     
@@ -176,6 +154,8 @@ pub mod sovereign_liquidity {
         new_min_fee_lamports: Option<u64>,
         new_min_deposit: Option<u64>,
         new_min_bond_target: Option<u64>,
+        new_unwind_fee_bps: Option<u16>,
+        new_volume_threshold_bps: Option<u16>,
     ) -> Result<()> {
         instructions::admin::update_protocol_fees_handler(
             ctx,
@@ -183,6 +163,8 @@ pub mod sovereign_liquidity {
             new_min_fee_lamports,
             new_min_deposit,
             new_min_bond_target,
+            new_unwind_fee_bps,
+            new_volume_threshold_bps,
         )
     }
 
@@ -220,5 +202,52 @@ pub mod sovereign_liquidity {
     /// Only after recovery is complete (or anytime for FairLaunch mode)
     pub fn renounce_sell_fee(ctx: Context<RenounceSellFee>) -> Result<()> {
         instructions::admin::renounce_sell_fee_handler(ctx)
+    }
+
+    // ============ Emergency Functions ============
+
+    /// Emergency unlock - transitions sovereign to EmergencyUnlocked state
+    /// Callable by protocol authority or sovereign creator from ANY state
+    pub fn emergency_unlock(ctx: Context<EmergencyUnlock>) -> Result<()> {
+        instructions::emergency::emergency_unlock_handler(ctx)
+    }
+
+    /// Emergency withdraw for investors - reclaim deposited GOR
+    /// If Genesis NFT was minted, pass nft_mint and nft_token_account as remaining_accounts
+    pub fn emergency_withdraw<'info>(
+        ctx: Context<'_, '_, 'info, 'info, EmergencyWithdraw<'info>>,
+    ) -> Result<()> {
+        instructions::emergency::emergency_withdraw_handler(ctx)
+    }
+
+    /// Emergency withdraw for creator - reclaim escrow and creation fee
+    pub fn emergency_withdraw_creator(ctx: Context<EmergencyWithdrawCreator>, burn_tokens: bool) -> Result<()> {
+        instructions::emergency::emergency_withdraw_creator_handler(ctx, burn_tokens)
+    }
+
+    /// Emergency remove liquidity from SAMM pool
+    /// Only callable by protocol authority when sovereign is EmergencyUnlocked
+    /// Must be called before emergency_withdraw on post-finalization sovereigns
+    pub fn emergency_remove_liquidity<'info>(
+        ctx: Context<'_, '_, 'info, 'info, EmergencyRemoveLiquidity<'info>>,
+    ) -> Result<()> {
+        instructions::emergency::emergency_remove_liquidity_handler(ctx)
+    }
+
+    /// Emergency token redemption - external token holders burn sovereign tokens
+    /// to receive proportional share of surplus GOR from the LP unwind.
+    /// Available when token_redemption_pool > 0 (unwind_sol_balance > total_deposited).
+    pub fn emergency_token_redemption(
+        ctx: Context<EmergencyTokenRedemption>,
+    ) -> Result<()> {
+        instructions::emergency::emergency_token_redemption_handler(ctx)
+    }
+
+    /// Sweep unclaimed redemption pool GOR to treasury after 30-day window expires.
+    /// Only callable by protocol authority.
+    pub fn sweep_redemption_pool(
+        ctx: Context<SweepRedemptionPool>,
+    ) -> Result<()> {
+        instructions::emergency::sweep_redemption_pool_handler(ctx)
     }
 }

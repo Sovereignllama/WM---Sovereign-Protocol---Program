@@ -17,6 +17,8 @@ pub struct SovereignCreated {
     pub creation_fee_escrowed: u64,
     pub sell_fee_bps: u16,
     pub fee_mode: FeeMode,
+    pub amm_config: Pubkey,
+    pub swap_fee_bps: u16,
 }
 
 #[event]
@@ -38,6 +40,26 @@ pub struct SovereignFinalized {
     pub lp_tokens: u64,
     pub recovery_target: u64,
     pub finalized_at: i64,
+}
+
+#[event]
+pub struct SammPoolCreated {
+    pub sovereign_id: u64,
+    pub pool_state: Pubkey,
+    pub token_mint_0: Pubkey,
+    pub token_mint_1: Pubkey,
+    pub sqrt_price_x64: u128,
+    pub created_at: i64,
+}
+
+#[event]
+pub struct LiquidityAdded {
+    pub sovereign_id: u64,
+    pub pool_state: Pubkey,
+    pub position_nft_mint: Pubkey,
+    pub liquidity: u128,
+    pub amount_0: u64,
+    pub amount_1: u64,
 }
 
 #[event]
@@ -259,6 +281,7 @@ pub struct ProtocolFeesUpdated {
     pub min_fee_lamports: u64,
     pub min_deposit: u64,
     pub min_bond_target: u64,
+    pub unwind_fee_bps: u16,
 }
 
 #[event]
@@ -288,4 +311,39 @@ pub struct SellFeeRenounced {
     pub sovereign_id: u64,
     pub old_fee_bps: u16,
     pub renounced_by: Pubkey,
+}
+
+// ============================================================
+// EMERGENCY EVENTS
+// ============================================================
+
+#[event]
+pub struct EmergencyUnlocked {
+    pub sovereign_id: u64,
+    pub caller: Pubkey,
+    pub previous_state: u8,
+    pub unlocked_at: i64,
+}
+
+#[event]
+pub struct EmergencyWithdrawal {
+    pub sovereign_id: u64,
+    pub depositor: Pubkey,
+    pub amount: u64,
+}
+
+#[event]
+pub struct EmergencyCreatorWithdrawal {
+    pub sovereign_id: u64,
+    pub creator: Pubkey,
+    pub escrow_returned: u64,
+    pub creation_fee_returned: u64,
+    pub tokens_burned: bool,
+    pub token_amount: u64,
+}
+
+#[event]
+pub struct SovereignRetired {
+    pub sovereign_id: u64,
+    pub retired_at: i64,
 }

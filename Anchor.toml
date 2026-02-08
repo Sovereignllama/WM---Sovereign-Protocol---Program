@@ -5,6 +5,13 @@ solana_version = "2.3.0"
 [features]
 resolution = true
 skip-lint = false
+seeds = false
+
+[features.localnet]
+sovereign_liquidity = ["localnet"]
+
+[features.devnet]
+sovereign_liquidity = ["devnet"]
 
 [programs.localnet]
 sovereign_liquidity = "2LPPAG7UhVop1RiRBh8oZtjzMoJ9St9WV4nY7JwmoNbA"

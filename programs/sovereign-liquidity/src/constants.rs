@@ -57,8 +57,17 @@ pub const VOTING_PERIOD: i64 = SEVEN_DAYS;
 /// Voting period in seconds (alias for compatibility)
 pub const VOTING_PERIOD_SECONDS: i64 = SEVEN_DAYS;
 
-/// Activity check period (90 days)
+/// Activity check period (90 days) — used for unwind observation window
 pub const ACTIVITY_CHECK_PERIOD_SECONDS: i64 = NINETY_DAYS;
+
+/// Unwind observation period (90 days)
+pub const UNWIND_OBSERVATION_PERIOD: i64 = NINETY_DAYS;
+
+/// Default unwind volume threshold in BPS (125 = 1.25% of total_deposited per 90 days = 5% APR)
+pub const DEFAULT_UNWIND_VOLUME_THRESHOLD_BPS: u16 = 125;
+
+/// Maximum unwind volume threshold in BPS (500 = 5% per 90 days = 20% APR)
+pub const MAX_UNWIND_VOLUME_THRESHOLD_BPS: u16 = 500;
 
 /// Timelock period after passed vote (2 days)
 pub const TIMELOCK_PERIOD: i64 = 2 * ONE_DAY;
@@ -82,14 +91,17 @@ pub const MAX_SELL_FEE_BPS: u16 = 300;
 /// Maximum creation fee (10% = 1000 bps)
 pub const MAX_CREATION_FEE_BPS: u16 = 1000;
 
-/// Maximum unwind fee (10% = 1000 bps)
-pub const MAX_UNWIND_FEE_BPS: u16 = 1000;
+/// Maximum unwind fee (20% = 2000 bps)
+pub const MAX_UNWIND_FEE_BPS: u16 = 2000;
 
 /// Default creation fee (0.5% = 50 bps)
 pub const DEFAULT_CREATION_FEE_BPS: u16 = 50;
 
-/// Default unwind fee (5% = 500 bps)
-pub const DEFAULT_UNWIND_FEE_BPS: u16 = 500;
+/// Default unwind fee (20% = 2000 bps)
+pub const DEFAULT_UNWIND_FEE_BPS: u16 = 2000;
+
+/// Token redemption window (30 days in seconds)
+pub const TOKEN_REDEMPTION_WINDOW: i64 = 30 * 24 * 60 * 60;
 
 /// Default BYO minimum supply (30% = 3000 bps)
 pub const DEFAULT_BYO_MIN_SUPPLY_BPS: u16 = 3000;
@@ -106,8 +118,8 @@ pub const PASS_THRESHOLD_BPS: u16 = 5100;
 /// Creator max buy-in (1% = 100 bps of bond target)
 pub const CREATOR_MAX_BUY_BPS: u16 = 100;
 
-/// LP allocation (80% = 8000 bps goes to LP)
-pub const LP_ALLOCATION_BPS: u16 = 8000;
+/// LP allocation (100% = 10000 bps - all deposited tokens go to LP per spec)
+pub const LP_ALLOCATION_BPS: u16 = 10000;
 
 // ============================================================
 // TRASHBIN SAMM (RAYDIUM CLMM) CONSTANTS
@@ -190,3 +202,25 @@ pub mod token_metadata {
     use anchor_lang::prelude::*;
     declare_id!("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 }
+
+/// WGOR (Wrapped GOR) - the native SOL mint on Gorbagana
+/// Same as Solana's native mint address
+pub mod wgor {
+    use anchor_lang::prelude::*;
+    declare_id!("So11111111111111111111111111111111111111112");
+}
+
+/// WGOR native mint address
+pub const WGOR_MINT: Pubkey = wgor::ID;
+
+// ============================================================
+// SAMM PDA SEEDS
+// ============================================================
+
+pub const SAMM_POOL_SEED: &[u8] = b"pool";
+pub const SAMM_POOL_VAULT_SEED: &[u8] = b"pool_vault";
+pub const SAMM_OBSERVATION_SEED: &[u8] = b"observation";
+pub const SAMM_TICK_ARRAY_BITMAP_SEED: &[u8] = b"pool_tick_array_bitmap_extension";
+pub const SAMM_TICK_ARRAY_SEED: &[u8] = b"tick_array";
+pub const SAMM_POSITION_SEED: &[u8] = b"position";
+pub const SAMM_PROTOCOL_POSITION_SEED: &[u8] = b"protocol_position";

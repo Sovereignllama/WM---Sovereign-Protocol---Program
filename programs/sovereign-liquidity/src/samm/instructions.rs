@@ -83,22 +83,23 @@ pub struct OpenPositionV2Args {
 
 impl OpenPositionV2Args {
     /// Create args for a FULL RANGE position
+    ///
+    /// When `liquidity = 0` and `base_flag` is `Some(true)`, the SAMM calculates
+    /// optimal liquidity from `amount_0_max`. When `Some(false)`, from `amount_1_max`.
+    /// This avoids precision mismatches between our f64 math and the SAMM's Q64.64.
     pub fn full_range(
         liquidity: u128,
         amount_0_max: u64,
         amount_1_max: u64,
         tick_spacing: i32,
+        base_flag: Option<bool>,
     ) -> Self {
-        // Calculate tick array start indices for full range
-        let tick_count_per_array = 60;
-        let ticks_in_array = tick_count_per_array * tick_spacing;
-        
         let tick_lower = super::tick::MIN_TICK;
         let tick_upper = super::tick::MAX_TICK;
         
-        // Align to tick array boundaries
-        let tick_array_lower_start = (tick_lower / ticks_in_array) * ticks_in_array;
-        let tick_array_upper_start = (tick_upper / ticks_in_array) * ticks_in_array;
+        // Use floor division for correct negative tick array alignment
+        let tick_array_lower_start = super::cpi::get_tick_array_start_index(tick_lower, tick_spacing);
+        let tick_array_upper_start = super::cpi::get_tick_array_start_index(tick_upper, tick_spacing);
         
         Self {
             tick_lower_index: tick_lower,
@@ -109,7 +110,7 @@ impl OpenPositionV2Args {
             amount_0_max,
             amount_1_max,
             with_metadata: true,
-            base_flag: None,
+            base_flag,
         }
     }
     
@@ -168,6 +169,8 @@ pub struct OpenPositionV2Accounts<'info> {
     pub vault_0_mint: AccountInfo<'info>,
     /// [] Vault 1 mint
     pub vault_1_mint: AccountInfo<'info>,
+    /// [writable] Tick array bitmap extension (remaining account for full-range)
+    pub tick_array_bitmap_extension: AccountInfo<'info>,
 }
 
 // ============================================================
@@ -320,6 +323,8 @@ pub struct DecreaseLiquidityV2Accounts<'info> {
     pub vault_0_mint: AccountInfo<'info>,
     /// [] Vault 1 mint
     pub vault_1_mint: AccountInfo<'info>,
+    /// [writable] Tick array bitmap extension (required for wide tick ranges)
+    pub tick_array_bitmap_extension: AccountInfo<'info>,
 }
 
 // ============================================================
@@ -483,6 +488,37 @@ impl CreatePoolArgs {
         data.extend(self.try_to_vec().unwrap());
         data
     }
+}
+
+/// Account ordering for create_pool CPI
+/// Creates a new CLMM pool with token vaults, observation, and bitmap
+pub struct CreatePoolAccounts<'info> {
+    /// [signer, writable] Pool creator (pays rent)
+    pub pool_creator: AccountInfo<'info>,
+    /// [] AMM config account
+    pub amm_config: AccountInfo<'info>,
+    /// [writable] Pool state PDA (seeds: ["pool", amm_config, token_mint_0, token_mint_1])
+    pub pool_state: AccountInfo<'info>,
+    /// [] Token mint 0 (lower pubkey)
+    pub token_mint_0: AccountInfo<'info>,
+    /// [] Token mint 1 (higher pubkey)
+    pub token_mint_1: AccountInfo<'info>,
+    /// [writable] Token vault 0 PDA (seeds: ["pool_vault", pool_state, token_mint_0])
+    pub token_vault_0: AccountInfo<'info>,
+    /// [writable] Token vault 1 PDA (seeds: ["pool_vault", pool_state, token_mint_1])
+    pub token_vault_1: AccountInfo<'info>,
+    /// [writable] Observation state PDA (seeds: ["observation", pool_state])
+    pub observation_state: AccountInfo<'info>,
+    /// [writable] Tick array bitmap extension PDA
+    pub tick_array_bitmap: AccountInfo<'info>,
+    /// [] Token program for token_0
+    pub token_program_0: AccountInfo<'info>,
+    /// [] Token program for token_1
+    pub token_program_1: AccountInfo<'info>,
+    /// [] System program
+    pub system_program: AccountInfo<'info>,
+    /// [] Rent sysvar
+    pub rent: AccountInfo<'info>,
 }
 
 // ============================================================

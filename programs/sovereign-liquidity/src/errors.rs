@@ -396,7 +396,44 @@ pub enum SovereignError {
     
     #[msg("Missing SAMM accounts - required for mainnet deployment")]
     MissingSAMMAccounts,
+
+    #[msg("Pool already created for this sovereign")]
+    PoolAlreadyCreated,
+
+    #[msg("Pool not yet created - call finalize_create_pool first")]
+    PoolNotCreated,
+
+    #[msg("Invalid token ordering - token_mint_0 must be less than token_mint_1")]
+    InvalidTokenOrdering,
+
+    #[msg("Invalid WGOR mint address")]
+    InvalidWgorMint,
+
+    #[msg("SAMM CPI failed - create_pool error")]
+    SammCreatePoolFailed,
+
+    #[msg("SAMM CPI failed - open_position error")]
+    SammOpenPositionFailed,
     
     #[msg("Voting power calculation overflow - value exceeds u16 max")]
     VotingPowerOverflow,
+
+    // ============================================================
+    // EMERGENCY ERRORS (6340-6359)
+    // ============================================================
+
+    #[msg("Sovereign is already emergency unlocked")]
+    AlreadyEmergencyUnlocked,
+
+    #[msg("No surplus GOR available for token redemption")]
+    NoRedemptionPool,
+
+    #[msg("No circulating tokens to redeem against")]
+    NoCirculatingTokens,
+
+    #[msg("Token redemption window has expired")]
+    RedemptionWindowExpired,
+
+    #[msg("Token redemption window has not expired yet")]
+    RedemptionWindowNotExpired,
 }

@@ -10,6 +10,7 @@ pub mod governance;
 pub mod activity_check;
 pub mod failed_bonding;
 pub mod admin;
+pub mod emergency;
 
 // Glob re-exports for Anchor compatibility
 // Note: "ambiguous glob re-exports" warning for `handler` is benign -
@@ -27,3 +28,4 @@ pub use governance::*;
 pub use activity_check::*;
 pub use failed_bonding::*;
 pub use admin::*;
+pub use emergency::*;

@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::Token;
+use anchor_spl::token::{Token, TokenAccount};
 use anchor_lang::prelude::InterfaceAccount;
 use crate::state::*;
 use crate::constants::*;
@@ -108,7 +108,7 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
     // [12] vault_0_mint - Vault 0 mint
     // [13] vault_1_mint - Vault 1 mint
     
-    let (sol_fees_collected, token_fees_collected) = if ctx.remaining_accounts.len() >= 14 {
+    let (sol_fees_collected, token_fees_collected) = if ctx.remaining_accounts.len() >= 15 {
         // SECURITY: Validate pool_state matches the sovereign's stored pool_state
         // This prevents attackers from passing arbitrary pool accounts
         require!(
@@ -137,6 +137,7 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
             memo_program: ctx.remaining_accounts[11].clone(),
             vault_0_mint: ctx.remaining_accounts[12].clone(),
             vault_1_mint: ctx.remaining_accounts[13].clone(),
+            tick_array_bitmap_extension: ctx.remaining_accounts[14].clone(),
         };
         
         // Use permanent_lock as signer (it owns the position NFT)
@@ -191,7 +192,7 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
             
             // Unlock the pool via SAMM CPI (remove LP restrictions)
             // This allows external LPs to enter the pool
-            if ctx.remaining_accounts.len() >= 14 {
+            if ctx.remaining_accounts.len() >= 15 {
                 let pool_state_info = &ctx.remaining_accounts[2];
                 let sovereign_key = sovereign.key();
                 let lock_seeds = &[
@@ -289,10 +290,13 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
 }
 
 /// Claim individual depositor's share of fees
+/// Authorization is purely via Genesis NFT possession (bearer instrument).
+/// The NFT holder — not necessarily the original depositor — receives fees.
 #[derive(Accounts)]
 pub struct ClaimDepositorFees<'info> {
+    /// Current NFT holder (bearer of the position)
     #[account(mut)]
-    pub depositor: Signer<'info>,
+    pub holder: Signer<'info>,
     
     #[account(
         seeds = [SOVEREIGN_SEED, &sovereign.sovereign_id.to_le_bytes()],
@@ -300,13 +304,24 @@ pub struct ClaimDepositorFees<'info> {
     )]
     pub sovereign: Account<'info, SovereignState>,
     
+    /// CHECK: Original depositor wallet — used only for deposit_record PDA derivation.
+    /// Verified implicitly by PDA seed match.
+    pub original_depositor: UncheckedAccount<'info>,
+    
     #[account(
         mut,
-        seeds = [DEPOSIT_RECORD_SEED, sovereign.key().as_ref(), depositor.key().as_ref()],
+        seeds = [DEPOSIT_RECORD_SEED, sovereign.key().as_ref(), original_depositor.key().as_ref()],
         bump = deposit_record.bump,
-        constraint = deposit_record.depositor == depositor.key() @ SovereignError::Unauthorized
     )]
     pub deposit_record: Account<'info, DepositRecord>,
+    
+    /// Genesis NFT token account — proves the holder possesses the position NFT
+    #[account(
+        constraint = nft_token_account.amount == 1 @ SovereignError::NoGenesisNFT,
+        constraint = nft_token_account.mint == deposit_record.nft_mint.unwrap() @ SovereignError::WrongNFT,
+        constraint = nft_token_account.owner == holder.key() @ SovereignError::Unauthorized,
+    )]
+    pub nft_token_account: Account<'info, TokenAccount>,
     
     /// CHECK: Fee vault holding accumulated fees
     #[account(
@@ -329,6 +344,9 @@ pub fn claim_depositor_fees_handler(ctx: Context<ClaimDepositorFees>) -> Result<
         sovereign.state == SovereignStatus::Active,
         SovereignError::InvalidState
     );
+    
+    // Genesis NFT must have been minted
+    require!(deposit_record.nft_minted, SovereignError::NFTNotMinted);
     
     // CRITICAL: Prevent division by zero
     require!(
@@ -360,15 +378,12 @@ pub fn claim_depositor_fees_handler(ctx: Context<ClaimDepositorFees>) -> Result<
     
     if claimable > 0 {
         // Verify vault has sufficient balance
-        let vault_info = ctx.accounts.fee_vault.to_account_info();
-        let vault_balance = vault_info.lamports();
+        let vault_balance = ctx.accounts.fee_vault.lamports();
         
         require!(
             vault_balance >= claimable,
             SovereignError::InsufficientVaultBalance
         );
-        
-        let depositor_info = ctx.accounts.depositor.to_account_info();
         
         // Atomic update: first update claimed amount, then transfer
         // This order prevents reentrancy-style exploits
@@ -376,16 +391,25 @@ pub fn claim_depositor_fees_handler(ctx: Context<ClaimDepositorFees>) -> Result<
             .checked_add(claimable)
             .ok_or(SovereignError::Overflow)?;
         
-        // Transfer from fee vault to depositor
-        let vault_current = vault_info.lamports();
-        let depositor_current = depositor_info.lamports();
+        // Transfer from fee vault to holder using System Program CPI
+        let sovereign_key = sovereign.key();
+        let vault_seeds: &[&[u8]] = &[
+            SOL_VAULT_SEED,
+            sovereign_key.as_ref(),
+            &[ctx.bumps.fee_vault],
+        ];
         
-        **vault_info.try_borrow_mut_lamports()? = vault_current
-            .checked_sub(claimable)
-            .ok_or(SovereignError::InsufficientVaultBalance)?;
-        **depositor_info.try_borrow_mut_lamports()? = depositor_current
-            .checked_add(claimable)
-            .ok_or(SovereignError::Overflow)?;
+        anchor_lang::system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.fee_vault.to_account_info(),
+                    to: ctx.accounts.holder.to_account_info(),
+                },
+                &[vault_seeds],
+            ),
+            claimable,
+        )?;
     }
     
     Ok(())
@@ -440,18 +464,25 @@ pub fn withdraw_creator_fees_handler(ctx: Context<WithdrawCreatorFees>) -> Resul
     tracker.pending_withdrawal = 0;
     tracker.total_claimed = tracker.total_claimed.checked_add(amount).unwrap();
     
-    // Transfer from fee vault to creator
-    let vault_info = ctx.accounts.fee_vault.to_account_info();
-    let creator_info = ctx.accounts.creator.to_account_info();
+    // Transfer from fee vault to creator using System Program CPI
+    let sovereign_key = _sovereign.key();
+    let vault_seeds: &[&[u8]] = &[
+        SOL_VAULT_SEED,
+        sovereign_key.as_ref(),
+        &[ctx.bumps.fee_vault],
+    ];
     
-    **vault_info.try_borrow_mut_lamports()? = vault_info
-        .lamports()
-        .checked_sub(amount)
-        .ok_or(SovereignError::InsufficientVaultBalance)?;
-    **creator_info.try_borrow_mut_lamports()? = creator_info
-        .lamports()
-        .checked_add(amount)
-        .ok_or(SovereignError::Overflow)?;
+    anchor_lang::system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            anchor_lang::system_program::Transfer {
+                from: ctx.accounts.fee_vault.to_account_info(),
+                to: ctx.accounts.creator.to_account_info(),
+            },
+            &[vault_seeds],
+        ),
+        amount,
+    )?;
     
     Ok(())
 }

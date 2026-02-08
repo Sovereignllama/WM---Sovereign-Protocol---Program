@@ -35,8 +35,8 @@ pub struct ProtocolState {
     // UNWIND FEE
     // ============================================================
     
-    /// Fee taken from SOL during unwind (0-1000 = 0-10%)
-    /// Default: 500 (5%)
+    /// Fee taken from total WGOR during governance-driven unwind (0-2000 = 0-20%)
+    /// NOT applied during emergency unwind. Default: 2000 (20%)
     pub unwind_fee_bps: u16,
     
     // ============================================================
@@ -62,10 +62,13 @@ pub struct ProtocolState {
     pub auto_unwind_period: i64,
     
     // ============================================================
-    // ACTIVITY CHECK THRESHOLD
+    // UNWIND VOLUME THRESHOLD
     // ============================================================
     
-    /// Minimum fee growth to count as "active" (MUST be > 0)
+    /// Minimum fee growth (Q64.64 delta) during 90-day observation period
+    /// to prove the sovereign is still viable and cancel the unwind.
+    /// Default: 1.25% of total_deposited annualized (5% APR / 4 quarters).
+    /// Adjustable by protocol authority.
     pub min_fee_growth_threshold: u128,
     
     /// If true, fee threshold is locked forever
@@ -112,7 +115,7 @@ impl ProtocolState {
     pub fn default_creation_fee_bps() -> u16 { 50 }  // 0.5%
     pub fn default_min_fee_lamports() -> u64 { 50_000_000 }  // 0.05 SOL
     pub fn default_governance_unwind_fee() -> u64 { 50_000_000 }  // 0.05 SOL
-    pub fn default_unwind_fee_bps() -> u16 { 500 }  // 5%
+    pub fn default_unwind_fee_bps() -> u16 { 2000 }  // 20%
     pub fn default_byo_min_supply_bps() -> u16 { 3000 }  // 30%
     pub fn default_min_bond_target() -> u64 { 50_000_000_000 }  // 50 SOL
     pub fn default_min_deposit() -> u64 { 100_000_000 }  // 0.1 SOL

@@ -28,6 +28,12 @@ test-ledger/
 *.swo
 *~
 
+# Scripts (debug/admin utilities)
+scripts/
+
+# Trashbin
+Trashbin data/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -5,25 +5,17 @@ use anchor_spl::token_2022::{
     spl_token_2022::{
         self,
         instruction as token_instruction,
-        extension::{ExtensionType, transfer_hook, transfer_fee},
+        extension::{
+            ExtensionType, transfer_fee,
+            metadata_pointer,
+        },
     },
 };
-use anchor_spl::token_interface::TokenAccount as Token2022Account;
-use anchor_lang::prelude::InterfaceAccount;
-use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::metadata::{
-    create_metadata_accounts_v3,
-    CreateMetadataAccountsV3,
-    Metadata as MetadataProgram,
-    mpl_token_metadata::types::DataV2,
-};
+use spl_token_metadata_interface::instruction as token_metadata_instruction;
 use crate::state::*;
 use crate::constants::*;
 use crate::errors::SovereignError;
 use crate::events::TokenCreated;
-
-// Import our own program ID for the transfer hook
-use crate::ID as SOVEREIGN_PROGRAM_ID;
 
 /// Parameters for creating a new token for a TokenLaunch sovereign
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -69,31 +61,17 @@ pub struct CreateToken<'info> {
     )]
     pub token_mint: UncheckedAccount<'info>,
     
-    /// Token vault to hold initial supply (Token-2022 account)
+    /// Token vault to hold initial supply - created manually after mint init
+    /// CHECK: Will be initialized as Token-2022 token account via CPI after mint is ready
     #[account(
-        init,
-        payer = creator,
-        token::mint = token_mint,
-        token::authority = sovereign,
-        token::token_program = token_program_2022,
+        mut,
         seeds = [TOKEN_VAULT_SEED, sovereign.key().as_ref()],
         bump
     )]
-    pub token_vault: InterfaceAccount<'info, Token2022Account>,
-    
-    /// Metadata account for the token
-    /// CHECK: Created via Metaplex CPI
-    #[account(mut)]
-    pub metadata_account: UncheckedAccount<'info>,
+    pub token_vault: UncheckedAccount<'info>,
     
     /// Token-2022 program
     pub token_program_2022: Program<'info, Token2022>,
-    
-    /// Associated token program
-    pub associated_token_program: Program<'info, AssociatedToken>,
-    
-    /// Metaplex metadata program
-    pub metadata_program: Program<'info, MetadataProgram>,
     
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
@@ -141,26 +119,42 @@ pub fn handler(ctx: Context<CreateToken>, params: CreateTokenParams) -> Result<(
     let mint_signer = &[&mint_seeds[..]];
     
     // Calculate space needed for Token-2022 mint with extensions
-    // Add TransferFeeConfig (for automatic fee withholding) and TransferHook (for custom logic)
+    // MetadataPointer is always added (points metadata to the mint itself)
+    // TransferFeeConfig and TransferHook are added when sell fee > 0
     let extensions = if sovereign.sell_fee_bps > 0 {
         vec![
             ExtensionType::TransferFeeConfig,  // Automatic fee withholding
-            ExtensionType::TransferHook,       // Custom sell detection logic
+            ExtensionType::MetadataPointer,    // Points to self for token metadata
         ]
     } else {
-        vec![]
+        vec![
+            ExtensionType::MetadataPointer,    // Points to self for token metadata
+        ]
     };
     
     let mint_len = ExtensionType::try_calculate_account_len::<spl_token_2022::state::Mint>(&extensions)?;
-    let rent = &ctx.accounts.rent;
-    let lamports = rent.minimum_balance(mint_len);
     
-    // Create the mint account
+    // Estimate total size including Token-2022 native metadata (for lamport calculation)
+    // Token-2022 will realloc the account during metadata init, but needs enough lamports
+    // TLV header (12) + update_authority (32) + mint (32) + strings (4+len each) + empty vec (4)
+    let metadata_space = 12 + 32 + 32
+        + 4 + params.name.len()
+        + 4 + params.symbol.len()
+        + 4 + params.uri.len()
+        + 4;
+    let total_mint_len = mint_len + metadata_space;
+    
+    let rent = &ctx.accounts.rent;
+    // Fund with enough lamports for the final size (after metadata realloc),
+    // but create with mint_len so InitializeMint2 sees the correct extension layout
+    let lamports = rent.minimum_balance(total_mint_len);
+    
+    // Create the mint account with exact extension size
     let create_account_ix = anchor_lang::solana_program::system_instruction::create_account(
         &ctx.accounts.creator.key(),
         &token_mint.key(),
         lamports,
-        mint_len as u64,
+        mint_len as u64,  // exact extension size (NOT total_mint_len)
         &spl_token_2022::ID,
     );
     
@@ -195,23 +189,23 @@ pub fn handler(ctx: Context<CreateToken>, params: CreateTokenParams) -> Result<(
             ],
             mint_signer,
         )?;
-        
-        // Initialize TransferHook extension for custom sell detection
-        let init_hook_ix = transfer_hook::instruction::initialize(
-            &spl_token_2022::ID,
-            &token_mint.key(),
-            Some(sovereign.key()), // Hook authority = sovereign PDA
-            Some(SOVEREIGN_PROGRAM_ID), // Hook program = our program
-        )?;
-        
-        invoke_signed(
-            &init_hook_ix,
-            &[
-                token_mint.to_account_info(),
-            ],
-            mint_signer,
-        )?;
     }
+    
+    // Initialize MetadataPointer extension - points metadata to the mint itself
+    let init_metadata_pointer_ix = metadata_pointer::instruction::initialize(
+        &spl_token_2022::ID,
+        &token_mint.key(),
+        None, // No separate authority
+        Some(token_mint.key()), // Metadata address = the mint itself
+    )?;
+    
+    invoke_signed(
+        &init_metadata_pointer_ix,
+        &[
+            token_mint.to_account_info(),
+        ],
+        mint_signer,
+    )?;
     
     // Initialize the mint
     let init_mint_ix = token_instruction::initialize_mint2(
@@ -228,6 +222,65 @@ pub fn handler(ctx: Context<CreateToken>, params: CreateTokenParams) -> Result<(
             token_mint.to_account_info(),
         ],
         mint_signer,
+    )?;
+    
+    // Now create and initialize the token vault as a Token-2022 token account
+    // This must happen AFTER the mint is initialized
+    let vault_bump = ctx.bumps.token_vault;
+    let vault_seeds = &[
+        TOKEN_VAULT_SEED,
+        sovereign_key.as_ref(),
+        &[vault_bump],
+    ];
+    let vault_signer = &[&vault_seeds[..]];
+    
+    // Calculate space for Token-2022 token account
+    // Must include extensions matching the mint: TransferFeeAmount (for TransferFeeConfig)
+    // and TransferHookAccount (for TransferHook)
+    let vault_extensions: Vec<ExtensionType> = if sovereign.sell_fee_bps > 0 {
+        vec![
+            ExtensionType::TransferFeeAmount,
+        ]
+    } else {
+        vec![]
+    };
+    let vault_len = ExtensionType::try_calculate_account_len::<spl_token_2022::state::Account>(&vault_extensions)?;
+    let vault_lamports = rent.minimum_balance(vault_len);
+    
+    // Create the vault account
+    let create_vault_ix = anchor_lang::solana_program::system_instruction::create_account(
+        &ctx.accounts.creator.key(),
+        &ctx.accounts.token_vault.key(),
+        vault_lamports,
+        vault_len as u64,
+        &spl_token_2022::ID,
+    );
+    
+    invoke_signed(
+        &create_vault_ix,
+        &[
+            ctx.accounts.creator.to_account_info(),
+            ctx.accounts.token_vault.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+        vault_signer,
+    )?;
+    
+    // Initialize the vault as a token account owned by the sovereign PDA
+    let init_vault_ix = token_instruction::initialize_account3(
+        &spl_token_2022::ID,
+        &ctx.accounts.token_vault.key(),
+        &token_mint.key(),
+        &sovereign.key(),
+    )?;
+    
+    invoke_signed(
+        &init_vault_ix,
+        &[
+            ctx.accounts.token_vault.to_account_info(),
+            token_mint.to_account_info(),
+        ],
+        vault_signer,
     )?;
     
     // Mint total supply to token vault
@@ -250,33 +303,26 @@ pub fn handler(ctx: Context<CreateToken>, params: CreateTokenParams) -> Result<(
         sovereign_signer,
     )?;
     
-    // Create metadata using Metaplex
-    create_metadata_accounts_v3(
-        CpiContext::new_with_signer(
-            ctx.accounts.metadata_program.to_account_info(),
-            CreateMetadataAccountsV3 {
-                metadata: ctx.accounts.metadata_account.to_account_info(),
-                mint: token_mint.to_account_info(),
-                mint_authority: sovereign.to_account_info(),
-                payer: ctx.accounts.creator.to_account_info(),
-                update_authority: sovereign.to_account_info(),
-                system_program: ctx.accounts.system_program.to_account_info(),
-                rent: ctx.accounts.rent.to_account_info(),
-            },
-            sovereign_signer,
-        ),
-        DataV2 {
-            name: params.name.clone(),
-            symbol: params.symbol.clone(),
-            uri: params.uri.clone(),
-            seller_fee_basis_points: 0,
-            creators: None,
-            collection: None,
-            uses: None,
-        },
-        true, // is_mutable
-        true, // update_authority_is_signer
-        None, // collection_details
+    // Create token metadata using Token-2022's native TokenMetadata extension
+    // This stores metadata directly on the mint account (no separate Metaplex account needed)
+    let init_token_metadata_ix = token_metadata_instruction::initialize(
+        &spl_token_2022::ID,
+        &token_mint.key(),
+        &sovereign.key(),  // Update authority
+        &token_mint.key(),  // Mint
+        &sovereign.key(),  // Mint authority
+        params.name.clone(),
+        params.symbol.clone(),
+        params.uri.clone(),
+    );
+    
+    invoke_signed(
+        &init_token_metadata_ix,
+        &[
+            token_mint.to_account_info(),
+            sovereign.to_account_info(),
+        ],
+        sovereign_signer,
     )?;
     
     // Update sovereign state with token mint

@@ -106,25 +106,31 @@ pub fn withdraw_failed_handler(ctx: Context<WithdrawFailed>) -> Result<()> {
     require!(amount > 0, SovereignError::NothingToWithdraw);
     
     // Verify vault has sufficient balance
-    let vault_info = ctx.accounts.sol_vault.to_account_info();
-    let vault_balance = vault_info.lamports();
+    let vault_balance = ctx.accounts.sol_vault.lamports();
     require!(
         vault_balance >= amount,
         SovereignError::InsufficientVaultBalance
     );
     
-    // Transfer SOL from vault to depositor
-    let depositor_info = ctx.accounts.depositor.to_account_info();
+    // Transfer SOL from vault to depositor using System Program CPI
+    let sovereign_key = sovereign.key();
+    let vault_seeds: &[&[u8]] = &[
+        SOL_VAULT_SEED,
+        sovereign_key.as_ref(),
+        &[ctx.bumps.sol_vault],
+    ];
     
-    let vault_current = vault_info.lamports();
-    let depositor_current = depositor_info.lamports();
-    
-    **vault_info.try_borrow_mut_lamports()? = vault_current
-        .checked_sub(amount)
-        .ok_or(SovereignError::InsufficientVaultBalance)?;
-    **depositor_info.try_borrow_mut_lamports()? = depositor_current
-        .checked_add(amount)
-        .ok_or(SovereignError::Overflow)?;
+    anchor_lang::system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            anchor_lang::system_program::Transfer {
+                from: ctx.accounts.sol_vault.to_account_info(),
+                to: ctx.accounts.depositor.to_account_info(),
+            },
+            &[vault_seeds],
+        ),
+        amount,
+    )?;
     
     emit!(FailedWithdrawal {
         sovereign_id: sovereign.sovereign_id,
@@ -187,26 +193,32 @@ pub fn withdraw_creator_failed_handler(ctx: Context<WithdrawCreatorFailed>) -> R
     
     // Verify vault has sufficient balance for escrow
     if escrow_amount > 0 {
-        let vault_info = ctx.accounts.sol_vault.to_account_info();
-        let vault_balance = vault_info.lamports();
+        let vault_balance = ctx.accounts.sol_vault.lamports();
         
         require!(
             vault_balance >= escrow_amount,
             SovereignError::InsufficientVaultBalance
         );
         
-        // Transfer creator escrow from vault
-        let creator_info = ctx.accounts.creator.to_account_info();
+        // Transfer creator escrow from vault using System Program CPI
+        let sovereign_key = sovereign.key();
+        let vault_seeds: &[&[u8]] = &[
+            SOL_VAULT_SEED,
+            sovereign_key.as_ref(),
+            &[ctx.bumps.sol_vault],
+        ];
         
-        let vault_current = vault_info.lamports();
-        let creator_current = creator_info.lamports();
-        
-        **vault_info.try_borrow_mut_lamports()? = vault_current
-            .checked_sub(escrow_amount)
-            .ok_or(SovereignError::InsufficientVaultBalance)?;
-        **creator_info.try_borrow_mut_lamports()? = creator_current
-            .checked_add(escrow_amount)
-            .ok_or(SovereignError::Overflow)?;
+        anchor_lang::system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.sol_vault.to_account_info(),
+                    to: ctx.accounts.creator.to_account_info(),
+                },
+                &[vault_seeds],
+            ),
+            escrow_amount,
+        )?;
         
         // Clear escrow amount
         sovereign.creator_escrow = 0;

@@ -30,6 +30,8 @@ pub enum SovereignStatus {
     Bonding,
     /// Bond target met - ready to finalize
     Finalizing,
+    /// Pool created on SAMM - ready for liquidity addition
+    PoolCreated,
     /// LP created - in recovery phase (100% fees to investors)
     Recovery,
     /// Recovery complete - LP permanently locked, pool unrestricted
@@ -40,6 +42,10 @@ pub enum SovereignStatus {
     Unwound,
     /// Bonding failed - refund period active
     Failed,
+    /// Emergency unlocked - all participants can reclaim funds
+    EmergencyUnlocked,
+    /// All funds reclaimed - sovereign is retired
+    Retired,
 }
 
 /// Main sovereign state account - one per token launch
@@ -64,6 +70,22 @@ pub struct SovereignState {
     
     /// Current lifecycle state
     pub state: SovereignStatus,
+    
+    // ============================================================
+    // METADATA
+    // ============================================================
+    
+    /// Sovereign name (max 32 bytes)
+    pub name: String,
+    
+    /// Token name (max 32 bytes)
+    pub token_name: String,
+    
+    /// Token symbol (max 10 bytes)
+    pub token_symbol: String,
+    
+    /// Metadata URI (max 200 bytes)
+    pub metadata_uri: String,
     
     // ============================================================
     // BONDING CONFIGURATION
@@ -120,6 +142,16 @@ pub struct SovereignState {
     
     /// Amount held in creation fee escrow PDA
     pub creation_fee_escrowed: u64,
+    
+    // ============================================================
+    // SAMM POOL CONFIGURATION (set at creation)
+    // ============================================================
+    
+    /// Trashbin SAMM AmmConfig address (fee tier chosen by creator)
+    pub amm_config: Pubkey,
+    
+    /// Swap fee in basis points (matching the AMM config tier, e.g. 30 = 0.3%)
+    pub swap_fee_bps: u16,
     
     // ============================================================
     // POOL INFORMATION
@@ -185,25 +217,25 @@ pub struct SovereignState {
     pub last_activity: i64,
     
     // ============================================================
-    // ACTIVITY CHECK STATE (Active phase only)
+    // UNWIND OBSERVATION STATE
     // ============================================================
     
-    /// Whether an activity check is in progress
+    /// Whether an unwind observation period is in progress
     pub activity_check_initiated: bool,
     
-    /// Timestamp when activity check was initiated (Option for cleaner handling)
+    /// Timestamp when unwind observation was initiated (Option for cleaner handling)
     pub activity_check_initiated_at: Option<i64>,
     
-    /// Timestamp when activity check was initiated (legacy)
+    /// Timestamp when unwind observation period ends (90 days after vote passes)
     pub activity_check_timestamp: i64,
     
-    /// Snapshot of fee_growth_global_a at initiation
+    /// Snapshot of SAMM fee_growth_global_0_x64 at vote pass time
     pub fee_growth_snapshot_a: u128,
     
-    /// Snapshot of fee_growth_global_b at initiation
+    /// Snapshot of SAMM fee_growth_global_1_x64 at vote pass time
     pub fee_growth_snapshot_b: u128,
     
-    /// Timestamp of last cancelled activity check (for cooldown)
+    /// Timestamp of last cancelled unwind observation (for cooldown)
     pub activity_check_last_cancelled: i64,
     
     // ============================================================
@@ -215,6 +247,18 @@ pub struct SovereignState {
     
     /// Token balance after removing liquidity (for creator)
     pub unwind_token_balance: u64,
+    
+    /// Surplus GOR available for external token holder redemption
+    /// = max(0, unwind_sol_balance - total_deposited)
+    pub token_redemption_pool: u64,
+    
+    /// Snapshot of circulating tokens at time of LP removal
+    /// = mint.supply - token_vault.amount - lock_ata_tokens
+    pub circulating_tokens_at_unwind: u64,
+    
+    /// Deadline for token holders to redeem surplus GOR (unix timestamp).
+    /// After this, unclaimed GOR is swept to treasury.
+    pub token_redemption_deadline: i64,
     
     // ============================================================
     // TIMESTAMPS
@@ -237,6 +281,12 @@ pub struct SovereignState {
     pub bump: u8,
 }
 
+/// Max length constants for string fields
+pub const MAX_NAME_LEN: usize = 32;
+pub const MAX_TOKEN_NAME_LEN: usize = 32;
+pub const MAX_TOKEN_SYMBOL_LEN: usize = 10;
+pub const MAX_METADATA_URI_LEN: usize = 200;
+
 impl SovereignState {
     pub const LEN: usize = 8  // discriminator
         + 8   // sovereign_id
@@ -244,6 +294,10 @@ impl SovereignState {
         + 32  // token_mint
         + 1   // sovereign_type
         + 1   // state
+        + (4 + MAX_NAME_LEN)      // name (4 bytes length prefix + max chars)
+        + (4 + MAX_TOKEN_NAME_LEN) // token_name
+        + (4 + MAX_TOKEN_SYMBOL_LEN) // token_symbol
+        + (4 + MAX_METADATA_URI_LEN) // metadata_uri
         + 8   // bond_target
         + 8   // bond_deadline
         + 8   // bond_duration
@@ -256,6 +310,8 @@ impl SovereignState {
         + 1   // fee_mode
         + 1   // fee_control_renounced
         + 8   // creation_fee_escrowed
+        + 32  // amm_config
+        + 2   // swap_fee_bps
         + 32  // pool_state
         + 32  // position_mint
         + 1   // pool_restricted
@@ -265,18 +321,30 @@ impl SovereignState {
         + 1   // recovery_complete
         + 8   // active_proposal_id
         + 8   // proposal_count
+        + 1   // has_active_proposal
+        + 2   // fee_threshold_bps
+        + 8   // total_fees_collected
+        + 8   // total_recovered
+        + 8   // total_supply
+        + 32  // genesis_nft_mint
+        + 9   // unwound_at (Option<i64>)
+        + 8   // last_activity
         + 1   // activity_check_initiated
+        + 9   // activity_check_initiated_at (Option<i64>)
         + 8   // activity_check_timestamp
         + 16  // fee_growth_snapshot_a
         + 16  // fee_growth_snapshot_b
         + 8   // activity_check_last_cancelled
         + 8   // unwind_sol_balance
         + 8   // unwind_token_balance
+        + 8   // token_redemption_pool
+        + 8   // circulating_tokens_at_unwind
+        + 8   // token_redemption_deadline
         + 8   // last_activity_timestamp
         + 8   // created_at
         + 8   // finalized_at
         + 1   // bump
-        + 64; // padding for future expansion
+        + 40; // padding for future expansion (was 64, used 24 for redemption fields)
     
     /// Calculate maximum creator buy-in based on bond target
     pub fn max_creator_buy_in(&self) -> u64 {

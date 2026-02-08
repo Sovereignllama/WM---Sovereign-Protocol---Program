@@ -60,10 +60,10 @@ pub mod pool_status {
 
 /// Tick math constants
 pub mod tick {
-    /// Minimum tick index for full range positions
-    pub const MIN_TICK: i32 = -443636;
-    /// Maximum tick index for full range positions
-    pub const MAX_TICK: i32 = 443636;
-    /// Default tick spacing for standard pools
-    pub const DEFAULT_TICK_SPACING: i32 = 64;
+    /// Minimum tick index for full range positions (aligned to tick_spacing=10)
+    pub const MIN_TICK: i32 = -443630;
+    /// Maximum tick index for full range positions (aligned to tick_spacing=10)
+    pub const MAX_TICK: i32 = 443630;
+    /// Default tick spacing for standard pools (matches AMM configs on Trashbin)
+    pub const DEFAULT_TICK_SPACING: i32 = 10;
 }

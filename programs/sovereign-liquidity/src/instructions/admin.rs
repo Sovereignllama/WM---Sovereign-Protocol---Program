@@ -37,6 +37,8 @@ pub fn update_protocol_fees_handler(
     new_min_fee_lamports: Option<u64>,
     new_min_deposit: Option<u64>,
     new_min_bond_target: Option<u64>,
+    new_unwind_fee_bps: Option<u16>,
+    new_volume_threshold_bps: Option<u16>,
 ) -> Result<()> {
     let protocol = &mut ctx.accounts.protocol_state;
     
@@ -63,11 +65,25 @@ pub fn update_protocol_fees_handler(
         protocol.min_bond_target = min;
     }
     
+    // Update unwind fee (max 20% = 2000 BPS)
+    if let Some(fee_bps) = new_unwind_fee_bps {
+        require!(fee_bps <= MAX_UNWIND_FEE_BPS, SovereignError::FeeTooHigh);
+        protocol.unwind_fee_bps = fee_bps;
+    }
+    
+    // Update unwind volume threshold (max 5% per quarter = 500 BPS)
+    if let Some(threshold_bps) = new_volume_threshold_bps {
+        require!(threshold_bps <= MAX_UNWIND_VOLUME_THRESHOLD_BPS, SovereignError::FeeTooHigh);
+        require!(threshold_bps > 0, SovereignError::InvalidAmount);
+        protocol.min_fee_growth_threshold = threshold_bps as u128;
+    }
+    
     emit!(ProtocolFeesUpdated {
         creation_fee_bps: protocol.creation_fee_bps,
         min_fee_lamports: protocol.min_fee_lamports,
         min_deposit: protocol.min_deposit,
         min_bond_target: protocol.min_bond_target,
+        unwind_fee_bps: protocol.unwind_fee_bps,
     });
     
     Ok(())
