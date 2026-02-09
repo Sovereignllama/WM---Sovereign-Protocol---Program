@@ -38,7 +38,7 @@ pub mod discriminators {
     pub const SET_POOL_STATUS: [u8; 8] = [66, 32, 232, 139, 34, 85, 101, 44];
     
     /// swap_v2
-    pub const SWAP_V2: [u8; 8] = [43, 4, 237, 11, 26, 201, 106, 217];
+    pub const SWAP_V2: [u8; 8] = [43, 4, 237, 11, 26, 201, 30, 98];
     
     /// close_position
     pub const CLOSE_POSITION: [u8; 8] = [123, 134, 81, 0, 49, 68, 98, 98];

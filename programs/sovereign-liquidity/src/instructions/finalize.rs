@@ -165,12 +165,25 @@ pub fn finalize_create_pool_handler(ctx: Context<FinalizeCreatePool>) -> Result<
         token_amount
     };
 
+    // Account for Token-2022 transfer fee when computing the pool price.
+    // The tokens that actually reach the LP position = lp_tokens - fee.
+    // The pool price must reflect this post-fee amount.
+    let tokens_for_price = if sovereign.sell_fee_bps > 0 {
+        let fee = lp_tokens
+            .checked_mul(sovereign.sell_fee_bps as u64).unwrap()
+            .checked_add(9999).unwrap()
+            .checked_div(10000).unwrap();
+        lp_tokens.checked_sub(fee).unwrap()
+    } else {
+        lp_tokens
+    };
+
     let price = if wgor_is_0 {
         // price = token_1_per_token_0 = tokens / sol
-        lp_tokens as f64 / sol_amount as f64
+        tokens_for_price as f64 / sol_amount as f64
     } else {
         // price = token_1_per_token_0 = sol / tokens
-        sol_amount as f64 / lp_tokens as f64
+        sol_amount as f64 / tokens_for_price as f64
     };
 
     let sqrt_price_x64 = samm_cpi::price_to_sqrt_price_x64(price);
@@ -529,25 +542,41 @@ pub fn finalize_add_liquidity_handler<'info>(
 
     msg!("Transferred {} tokens to permanent lock", lp_tokens);
 
+    // ---- Account for Token-2022 transfer fee ----
+    // When sell_fee_bps > 0, Token-2022's transfer_checked withholds a fee at the
+    // destination. The lock_token_account's usable balance is lp_tokens minus the
+    // withheld fee. We must use the post-fee amount for SAMM LP and approvals.
+    let tokens_in_lock = if sovereign.sell_fee_bps > 0 {
+        let fee = lp_tokens
+            .checked_mul(sovereign.sell_fee_bps as u64).unwrap()
+            .checked_add(9999).unwrap()  // ceiling division to match Token-2022
+            .checked_div(10000).unwrap();
+        let received = lp_tokens.checked_sub(fee).unwrap();
+        msg!("Transfer fee: {} bps, fee={}, usable tokens in lock={}", sovereign.sell_fee_bps, fee, received);
+        received
+    } else {
+        lp_tokens
+    };
+
     // ---- Step 3: Determine token ordering for position ----
     let wgor_key = ctx.accounts.wgor_mint.key();
     let token_key = ctx.accounts.token_mint.key();
     let (_mint_0, _mint_1, is_swapped) = samm_cpi::sort_mints(&wgor_key, &token_key);
     let wgor_is_0 = !is_swapped;
 
-    // Set token accounts in correct order
+    // Set token accounts in correct order — use tokens_in_lock (post-fee) for the token side
     let (token_account_0, token_account_1, amount_0, amount_1) = if wgor_is_0 {
         (
             ctx.accounts.lock_wgor_account.to_account_info(),
             ctx.accounts.lock_token_account.to_account_info(),
             sol_amount,
-            lp_tokens,
+            tokens_in_lock,
         )
     } else {
         (
             ctx.accounts.lock_token_account.to_account_info(),
             ctx.accounts.lock_wgor_account.to_account_info(),
-            lp_tokens,
+            tokens_in_lock,
             sol_amount,
         )
     };
@@ -576,9 +605,9 @@ pub fn finalize_add_liquidity_handler<'info>(
 
     // Estimate liquidity for record-keeping (not used by SAMM)
     let price = if wgor_is_0 {
-        lp_tokens as f64 / sol_amount as f64
+        tokens_in_lock as f64 / sol_amount as f64
     } else {
-        sol_amount as f64 / lp_tokens as f64
+        sol_amount as f64 / tokens_in_lock as f64
     };
     let sqrt_price_x64 = samm_cpi::price_to_sqrt_price_x64(price);
     let liquidity_estimate = samm_cpi::calculate_full_range_liquidity(
@@ -627,7 +656,7 @@ pub fn finalize_add_liquidity_handler<'info>(
         data: {
             let mut buf = Vec::with_capacity(9);
             buf.push(4u8); // SPL Token Approve instruction index
-            buf.extend_from_slice(&lp_tokens.to_le_bytes());
+            buf.extend_from_slice(&tokens_in_lock.to_le_bytes());
             buf
         },
     };
@@ -1011,6 +1040,7 @@ pub fn mint_genesis_nft_handler(ctx: Context<MintGenesisNFT>) -> Result<()> {
     deposit_record.nft_minted = true;
     deposit_record.nft_mint = Some(ctx.accounts.nft_mint.key());
     deposit_record.voting_power_bps = voting_power as u16;
+    deposit_record.shares_bps = voting_power as u16;
 
     emit!(GenesisNFTMinted {
         sovereign_id: sovereign.sovereign_id,

@@ -64,9 +64,10 @@ pub fn propose_unwind_handler(ctx: Context<ProposeUnwind>) -> Result<()> {
     let _deposit_record = &ctx.accounts.deposit_record;
     let clock = Clock::get()?;
     
-    // Validate state - must be Active (not Recovery)
+    // Validate state - must be Recovery or Active
     require!(
-        sovereign.state == SovereignStatus::Active,
+        sovereign.state == SovereignStatus::Recovery
+            || sovereign.state == SovereignStatus::Active,
         SovereignError::InvalidState
     );
     
