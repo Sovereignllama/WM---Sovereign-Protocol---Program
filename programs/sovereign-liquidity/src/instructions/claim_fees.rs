@@ -359,7 +359,7 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
             msg!("Token routing accounts not provided — tokens remain in permanent_lock ATA");
         }
         
-        // ============ Close WGOR ATA → fee_vault ============
+        // ============ Solvency-Protected GOR Extraction ============
         // Read the FINAL WGOR balance (includes harvest GOR + any tokens swapped to WGOR).
         let wgor_final_balance = {
             let data = ctx.remaining_accounts[wgor_recipient_idx].try_borrow_data()?;
@@ -370,7 +370,89 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
             }
         };
         
+        // ---- Principal Protection Invariant ----
+        // Compute the maximum extractable GOR while preserving the property:
+        //   "If all tokens were sold back into the pool, GOR reserve ≥ bond_target"
+        //
+        // Formula: e_max = max(0, x_final - (x0 * S_total / y_final) * 1.001)
+        // Where:
+        //   x_final = current GOR in pool vault (WGOR balance)
+        //   y_final = current token in pool vault
+        //   x0 = sovereign.bond_target (original investor principal)
+        //   S_total = token mint supply
+        //   1.001 = 0.1% safety buffer for CLMM rounding
+        
+        let wgor_vault_idx: usize = if wgor_is_0 { 4 } else { 5 };
+        let token_vault_idx: usize = if wgor_is_0 { 5 } else { 4 };
+        
+        let x_final: u128 = {
+            let data = ctx.remaining_accounts[wgor_vault_idx].try_borrow_data()?;
+            if data.len() >= 72 {
+                u64::from_le_bytes(data[64..72].try_into().unwrap()) as u128
+            } else { 0u128 }
+        };
+        let y_final: u128 = {
+            let data = ctx.remaining_accounts[token_vault_idx].try_borrow_data()?;
+            if data.len() >= 72 {
+                u64::from_le_bytes(data[64..72].try_into().unwrap()) as u128
+            } else { 0u128 }
+        };
+        let s_total: u128 = {
+            let mint_data = ctx.accounts.token_mint.try_borrow_data()?;
+            if mint_data.len() >= 44 {
+                u64::from_le_bytes(mint_data[36..44].try_into().unwrap()) as u128
+            } else { 0u128 }
+        };
+        let x0: u128 = sovereign.bond_target as u128;
+        
+        // Minimum GOR that must remain in pool: (x0 * S_total / y_final) * 1.001
+        let min_reserve: u128 = if y_final > 0 {
+            x0.checked_mul(s_total).unwrap_or(u128::MAX)
+                .checked_div(y_final).unwrap_or(0)
+                .checked_mul(1001).unwrap_or(u128::MAX)
+                .checked_div(1000).unwrap_or(u128::MAX)
+        } else {
+            u128::MAX // No tokens in pool → don't extract anything
+        };
+        
+        let e_max: u64 = if x_final > min_reserve {
+            (x_final - min_reserve) as u64
+        } else {
+            0u64
+        };
+        
+        let extractable = std::cmp::min(wgor_final_balance, e_max);
+        let return_to_pool = wgor_final_balance - extractable;
+        
+        msg!("Solvency check: x_final={}, y_final={}, s_total={}, x0={}, min_reserve={}, e_max={}, extractable={}, return_to_pool={}",
+            x_final, y_final, s_total, x0, min_reserve, e_max, extractable, return_to_pool);
+        
         if wgor_final_balance > 0 {
+            // Return excess WGOR to pool vault to preserve principal
+            if return_to_pool > 0 {
+                let return_ix = spl_token::instruction::transfer(
+                    &spl_token::ID,
+                    &ctx.remaining_accounts[wgor_recipient_idx].key(),
+                    &ctx.remaining_accounts[wgor_vault_idx].key(),
+                    &ctx.accounts.permanent_lock.key(),
+                    &[],
+                    return_to_pool,
+                )?;
+                
+                invoke_signed(
+                    &return_ix,
+                    &[
+                        ctx.remaining_accounts[wgor_recipient_idx].clone(),
+                        ctx.remaining_accounts[wgor_vault_idx].clone(),
+                        ctx.accounts.permanent_lock.to_account_info(),
+                    ],
+                    lock_signer_seeds,
+                )?;
+                
+                msg!("Returned {} WGOR to pool vault (principal protection)", return_to_pool);
+            }
+            
+            // Close WGOR ATA → remaining extractable goes to fee_vault as native GOR
             let close_ix = spl_token::instruction::close_account(
                 &spl_token::ID,
                 &ctx.remaining_accounts[wgor_recipient_idx].key(),
@@ -389,10 +471,10 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
                 lock_signer_seeds,
             )?;
             
-            msg!("WGOR ATA closed → {} lamports to fee_vault", wgor_final_balance);
+            msg!("WGOR ATA closed → {} lamports to fee_vault (solvency-protected)", extractable);
         }
         
-        (wgor_final_balance, token_collected)
+        (extractable, token_collected)
     } else {
         // Simplified flow without SAMM CPI (test mode)
         msg!("SAMM accounts not provided - skipping CPI (test mode)");
