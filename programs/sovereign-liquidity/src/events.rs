@@ -162,6 +162,15 @@ pub struct TransferFeesHarvested {
     pub source_count: u32,
 }
 
+#[event]
+pub struct RecoveryTokensSwapped {
+    pub sovereign_id: u64,
+    pub tokens_swapped: u64,
+    pub sol_received: u64,
+    pub total_recovered: u64,
+    pub recovery_target: u64,
+}
+
 // ============================================================
 // GENESIS NFT EVENTS
 // ============================================================

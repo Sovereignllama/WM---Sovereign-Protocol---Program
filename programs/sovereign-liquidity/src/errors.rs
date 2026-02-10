@@ -436,4 +436,10 @@ pub enum SovereignError {
 
     #[msg("Token redemption window has not expired yet")]
     RedemptionWindowNotExpired,
+
+    #[msg("Invalid fee mode for this operation")]
+    InvalidFeeMode,
+
+    #[msg("Insufficient remaining accounts provided")]
+    InsufficientAccounts,
 }

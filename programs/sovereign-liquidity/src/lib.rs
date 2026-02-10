@@ -95,6 +95,14 @@ pub mod sovereign_liquidity {
         instructions::claim_fees::harvest_transfer_fees_handler(ctx)
     }
 
+    /// Swap recovery tokens (harvested transfer fees) to SOL via SAMM
+    /// This converts Token-2022 sell fees into GOR for investor recovery
+    pub fn swap_recovery_tokens<'info>(
+        ctx: Context<'_, '_, 'info, 'info, SwapRecoveryTokens<'info>>,
+    ) -> Result<()> {
+        instructions::claim_fees::swap_recovery_tokens_handler(ctx)
+    }
+
     // ============ Governance ============
     
     /// Propose to unwind the sovereign (Genesis NFT holders)

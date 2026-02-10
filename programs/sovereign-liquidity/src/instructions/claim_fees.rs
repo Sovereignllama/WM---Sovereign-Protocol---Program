@@ -1,10 +1,19 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{Token, TokenAccount};
+use anchor_spl::token::{Token, TokenAccount, spl_token};
 use anchor_lang::prelude::InterfaceAccount;
+use anchor_spl::token_2022::{
+    Token2022,
+    spl_token_2022::{
+        self,
+        extension::transfer_fee::instruction as transfer_fee_ix,
+    },
+};
+use anchor_spl::token_interface::{Mint as MintInterface, TokenAccount as TokenAccountInterface};
+use anchor_lang::solana_program::program::invoke_signed;
 use crate::state::*;
 use crate::constants::*;
 use crate::errors::SovereignError;
-use crate::events::{FeesClaimed, RecoveryComplete, PoolRestricted};
+use crate::events::{FeesClaimed, RecoveryComplete, PoolRestricted, SellFeeRenounced, RecoveryTokensSwapped};
 use crate::samm::{instructions as samm_ix, cpi as samm_cpi};
 
 /// Claim fees from the Trashbin SAMM position
@@ -46,7 +55,7 @@ pub struct ClaimFees<'info> {
     #[account(mut)]
     pub token_vault_b: UncheckedAccount<'info>,
     
-    /// Fee destination for SOL fees
+    /// Fee destination for GOR fees
     /// CHECK: PDA that collects fees
     #[account(
         mut,
@@ -67,14 +76,21 @@ pub struct ClaimFees<'info> {
     #[account(address = SAMM_PROGRAM_ID)]
     pub samm_program: UncheckedAccount<'info>,
     
+    /// Token mint — needed for FairLaunch auto-renounce on recovery completion
+    /// Optional: pass system_program if sovereign has no transfer fee
+    /// CHECK: Validated against sovereign.token_mint when used
+    #[account(mut)]
+    pub token_mint: UncheckedAccount<'info>,
+    
     pub token_program: Program<'info, Token>,
+    pub token_program_2022: Program<'info, Token2022>,
     pub system_program: Program<'info, System>,
 }
 
 pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> Result<()> {
     let sovereign = &mut ctx.accounts.sovereign;
     let protocol = &ctx.accounts.protocol_state;
-    let creator_tracker = &mut ctx.accounts.creator_fee_tracker;
+    let _creator_tracker = &ctx.accounts.creator_fee_tracker;
     let clock = Clock::get()?;
     
     // Check protocol pause status
@@ -93,20 +109,27 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
     // ============ Trashbin SAMM Fee Collection ============
     // CPI to SAMM decrease_liquidity_v2 with liquidity=0 (collects fees only)
     // Required remaining_accounts order:
-    // [0] nft_account - Position NFT token account
-    // [1] personal_position - Personal position state (writable)
-    // [2] pool_state - Pool state (writable)
-    // [3] protocol_position - Protocol position state (writable)
-    // [4] token_vault_0 - Pool token vault A (writable)
-    // [5] token_vault_1 - Pool token vault B (writable)
-    // [6] tick_array_lower - Lower tick array (writable)
-    // [7] tick_array_upper - Upper tick array (writable)
-    // [8] recipient_token_account_0 - Recipient for token A fees (writable)
-    // [9] recipient_token_account_1 - Recipient for token B fees (writable)
-    // [10] token_program_2022 - Token 2022 program (optional)
-    // [11] memo_program - Memo program (optional)
+    // [0]  nft_account - Position NFT token account
+    // [1]  personal_position - Personal position state (writable)
+    // [2]  pool_state - Pool state (writable)
+    // [3]  protocol_position - Protocol position state (writable)
+    // [4]  token_vault_0 - Pool token vault A (writable)
+    // [5]  token_vault_1 - Pool token vault B (writable)
+    // [6]  tick_array_lower - Lower tick array (writable)
+    // [7]  tick_array_upper - Upper tick array (writable)
+    // [8]  recipient_token_account_0 - Recipient for token A fees (writable)
+    // [9]  recipient_token_account_1 - Recipient for token B fees (writable)
+    // [10] token_program_2022 - Token 2022 program
+    // [11] memo_program - Memo program
     // [12] vault_0_mint - Vault 0 mint
     // [13] vault_1_mint - Vault 1 mint
+    // [14] tick_array_bitmap_extension
+    //
+    // --- Token fee routing (optional, index 15+) ---
+    // [15] amm_config           - SAMM AMM config (for swap path)
+    // [16] observation_state    - SAMM observation state (for swap path)
+    // [17] creator_token_ata    - Creator's Token-2022 ATA (for creator/active paths)
+    // [18+] swap_tick_arrays    - Tick arrays for token→WGOR swap
     
     let (sol_fees_collected, token_fees_collected) = if ctx.remaining_accounts.len() >= 15 {
         // SECURITY: Validate pool_state matches the sovereign's stored pool_state
@@ -115,6 +138,24 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
             ctx.remaining_accounts[2].key() == ctx.accounts.permanent_lock.pool_state,
             SovereignError::InvalidPool
         );
+        
+        // Determine which recipient is WGOR vs project token based on vault mints
+        let vault_0_mint_key = ctx.remaining_accounts[12].key();
+        let _vault_1_mint_key = ctx.remaining_accounts[13].key();
+        let wgor_is_0 = vault_0_mint_key == WGOR_MINT;
+        
+        let wgor_recipient_idx: usize = if wgor_is_0 { 8 } else { 9 };
+        let token_recipient_idx: usize = if wgor_is_0 { 9 } else { 8 };
+        
+        // Snapshot token recipient ATA balance before CPI (for tracking token fees)
+        let token_balance_before = {
+            let data = ctx.remaining_accounts[token_recipient_idx].try_borrow_data()?;
+            if data.len() >= 72 {
+                u64::from_le_bytes(data[64..72].try_into().unwrap())
+            } else {
+                0u64
+            }
+        };
         
         // Full SAMM CPI for fee collection
         msg!("Collecting fees via SAMM CPI...");
@@ -150,36 +191,221 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
         let lock_signer_seeds = &[&lock_seeds[..]];
         
         // CPI: Collect fees (decrease_liquidity_v2 with liquidity=0)
-        let result = samm_cpi::collect_fees(
+        samm_cpi::collect_fees(
             &ctx.accounts.samm_program.to_account_info(),
             decrease_accounts,
             lock_signer_seeds,
         )?;
         
-        msg!("Fees collected - SOL: {}, Token: {}", result.amount_0, result.amount_1);
+        // Read TOTAL WGOR ATA balance after harvest CPI.
+        // This captures both newly harvested fees AND any leftover from previous calls.
+        let wgor_balance_after_harvest = {
+            let data = ctx.remaining_accounts[wgor_recipient_idx].try_borrow_data()?;
+            if data.len() >= 72 {
+                u64::from_le_bytes(data[64..72].try_into().unwrap())
+            } else {
+                0u64
+            }
+        };
         
-        (result.amount_0, result.amount_1)
+        // Read TOTAL token ATA balance after harvest (includes any leftovers)
+        let token_total_balance = {
+            let data = ctx.remaining_accounts[token_recipient_idx].try_borrow_data()?;
+            if data.len() >= 72 {
+                u64::from_le_bytes(data[64..72].try_into().unwrap())
+            } else {
+                0u64
+            }
+        };
+        let token_collected = token_total_balance.saturating_sub(token_balance_before);
+        
+        msg!("WGOR in ATA: {}, Token in ATA: {} (new: {})", 
+            wgor_balance_after_harvest, token_total_balance, token_collected);
+        
+        // ============ Token Fee Routing ============
+        // Route the token portion based on fee_mode + sovereign state.
+        // The WGOR portion always goes to investors (handled below by closing WGOR ATA).
+        //
+        // Routing:
+        //   RecoveryBoost + Recovery  → swap tokens → WGOR ATA (added to GOR for investors)
+        //   FairLaunch + Recovery     → swap tokens → WGOR ATA (added to GOR for investors)
+        //   RecoveryBoost + Active    → transfer tokens → creator's ATA
+        //   FairLaunch + Active       → burn tokens (deflationary, benefits holders)
+        //   CreatorRevenue (any)      → transfer tokens → creator's ATA
+        
+        if token_total_balance > 0 && ctx.remaining_accounts.len() >= 18 {
+            let fee_mode = sovereign.fee_mode;
+            let is_recovery = sovereign.state == SovereignStatus::Recovery;
+            
+            let swap_to_investors = is_recovery && 
+                (fee_mode == FeeMode::RecoveryBoost || fee_mode == FeeMode::FairLaunch);
+            let burn_tokens = !is_recovery && fee_mode == FeeMode::FairLaunch;
+            let send_to_creator = fee_mode == FeeMode::CreatorRevenue || 
+                (!is_recovery && fee_mode == FeeMode::RecoveryBoost);
+            
+            if swap_to_investors {
+                // ---- SWAP PATH: token → WGOR via SAMM CPI ----
+                // permanent_lock signs (owns the token ATA as input)
+                msg!("Swapping {} tokens → WGOR for investor recovery...", token_total_balance);
+                
+                // Determine SAMM vault ordering for the swap
+                // Input = sovereign token, Output = WGOR
+                let (input_vault, output_vault) = if wgor_is_0 {
+                    // mint0=WGOR, mint1=token → vault_0=WGOR, vault_1=token
+                    // Input is token (vault_1), output is WGOR (vault_0)
+                    (ctx.remaining_accounts[5].clone(), ctx.remaining_accounts[4].clone())
+                } else {
+                    // mint0=token, mint1=WGOR → vault_0=token, vault_1=WGOR
+                    (ctx.remaining_accounts[4].clone(), ctx.remaining_accounts[5].clone())
+                };
+                
+                let (input_mint, output_mint) = if wgor_is_0 {
+                    (ctx.remaining_accounts[13].clone(), ctx.remaining_accounts[12].clone())
+                } else {
+                    (ctx.remaining_accounts[12].clone(), ctx.remaining_accounts[13].clone())
+                };
+                
+                // Collect tick arrays for swap from remaining_accounts[18+]
+                let swap_tick_arrays: Vec<AccountInfo<'info>> = ctx.remaining_accounts[18..].to_vec();
+                
+                let swap_accounts = samm_ix::SwapV2Accounts {
+                    payer: ctx.accounts.permanent_lock.to_account_info(),
+                    amm_config: ctx.remaining_accounts[15].clone(),
+                    pool_state: ctx.remaining_accounts[2].clone(),
+                    input_token_account: ctx.remaining_accounts[token_recipient_idx].clone(),
+                    output_token_account: ctx.remaining_accounts[wgor_recipient_idx].clone(),
+                    input_vault,
+                    output_vault,
+                    observation_state: ctx.remaining_accounts[16].clone(),
+                    token_program: ctx.accounts.token_program.to_account_info(),
+                    token_program_2022: ctx.remaining_accounts[10].clone(),
+                    memo_program: ctx.remaining_accounts[11].clone(),
+                    input_vault_mint: input_mint,
+                    output_vault_mint: output_mint,
+                };
+                
+                samm_cpi::swap_exact_input(
+                    &ctx.accounts.samm_program.to_account_info(),
+                    swap_accounts,
+                    token_total_balance,
+                    0, // min_amount_out — permissionless, protocol token, no MEV risk
+                    0, // no sqrt_price_limit
+                    swap_tick_arrays,
+                    lock_signer_seeds,
+                )?;
+                
+                msg!("Token → WGOR swap complete");
+                
+            } else if burn_tokens {
+                // ---- BURN PATH: FairLaunch + Active → burn tokens ----
+                msg!("Burning {} tokens (FairLaunch deflationary)...", token_total_balance);
+                
+                let burn_ix = spl_token_2022::instruction::burn(
+                    &spl_token_2022::ID,
+                    &ctx.remaining_accounts[token_recipient_idx].key(),
+                    &ctx.accounts.token_mint.key(),
+                    &ctx.accounts.permanent_lock.key(),
+                    &[],
+                    token_total_balance,
+                )?;
+                
+                invoke_signed(
+                    &burn_ix,
+                    &[
+                        ctx.remaining_accounts[token_recipient_idx].clone(),
+                        ctx.accounts.token_mint.to_account_info(),
+                        ctx.accounts.permanent_lock.to_account_info(),
+                    ],
+                    lock_signer_seeds,
+                )?;
+                
+                msg!("Burned {} tokens", token_total_balance);
+                
+            } else if send_to_creator {
+                // ---- CREATOR PATH: CreatorRevenue or RecoveryBoost+Active → creator ATA ----
+                msg!("Transferring {} tokens to creator...", token_total_balance);
+                
+                // Read decimals from raw mint data (offset 44 in SPL Mint layout)
+                let mint_decimals = {
+                    let mint_data = ctx.accounts.token_mint.try_borrow_data()?;
+                    mint_data[44]
+                };
+                
+                let transfer_ix = spl_token_2022::instruction::transfer_checked(
+                    &spl_token_2022::ID,
+                    &ctx.remaining_accounts[token_recipient_idx].key(),
+                    &ctx.accounts.token_mint.key(),
+                    &ctx.remaining_accounts[17].key(), // creator_token_ata
+                    &ctx.accounts.permanent_lock.key(),
+                    &[],
+                    token_total_balance,
+                    mint_decimals,
+                )?;
+                
+                invoke_signed(
+                    &transfer_ix,
+                    &[
+                        ctx.remaining_accounts[token_recipient_idx].clone(),
+                        ctx.accounts.token_mint.to_account_info(),
+                        ctx.remaining_accounts[17].clone(), // creator_token_ata
+                        ctx.accounts.permanent_lock.to_account_info(),
+                    ],
+                    lock_signer_seeds,
+                )?;
+                
+                msg!("Transferred {} tokens to creator", token_total_balance);
+            }
+        } else if token_total_balance > 0 {
+            msg!("Token routing accounts not provided — tokens remain in permanent_lock ATA");
+        }
+        
+        // ============ Close WGOR ATA → fee_vault ============
+        // Read the FINAL WGOR balance (includes harvest GOR + any tokens swapped to WGOR).
+        let wgor_final_balance = {
+            let data = ctx.remaining_accounts[wgor_recipient_idx].try_borrow_data()?;
+            if data.len() >= 72 {
+                u64::from_le_bytes(data[64..72].try_into().unwrap())
+            } else {
+                0u64
+            }
+        };
+        
+        if wgor_final_balance > 0 {
+            let close_ix = spl_token::instruction::close_account(
+                &spl_token::ID,
+                &ctx.remaining_accounts[wgor_recipient_idx].key(),
+                &ctx.accounts.fee_vault.key(),
+                &ctx.accounts.permanent_lock.key(),
+                &[],
+            )?;
+            
+            invoke_signed(
+                &close_ix,
+                &[
+                    ctx.remaining_accounts[wgor_recipient_idx].clone(),
+                    ctx.accounts.fee_vault.to_account_info(),
+                    ctx.accounts.permanent_lock.to_account_info(),
+                ],
+                lock_signer_seeds,
+            )?;
+            
+            msg!("WGOR ATA closed → {} lamports to fee_vault", wgor_final_balance);
+        }
+        
+        (wgor_final_balance, token_collected)
     } else {
         // Simplified flow without SAMM CPI (test mode)
         msg!("SAMM accounts not provided - skipping CPI (test mode)");
         (0u64, 0u64)
     };
     
-    // ============ Fee Distribution Logic ============
-    // Based on FeeMode:
-    // - CreatorRevenue: Creator gets up to fee_threshold_bps, rest to investors
-    // - RecoveryBoost: All fees to recovery until complete
-    // - FairLaunch: All fees to investors, no creator share
+    // ============ SAMM Trading Fee Distribution ============
+    // SAMM LP trading fees ALWAYS go 100% to investors (GOR portion).
+    // Token portion is routed based on fee_mode above.
     
-    let mut creator_fee_share: u64 = 0;
-    let mut investor_fee_share: u64 = sol_fees_collected;
+    let investor_fee_share: u64 = sol_fees_collected;
     
     if sovereign.state == SovereignStatus::Recovery {
-        // During recovery: ALL fees go to recovery regardless of fee mode
-        // This accelerates return of investor principal
-        investor_fee_share = sol_fees_collected;
-        creator_fee_share = 0;
-        
         // Track recovery progress
         sovereign.total_recovered = sovereign.total_recovered
             .checked_add(sol_fees_collected)
@@ -189,6 +415,7 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
         if sovereign.total_recovered >= sovereign.recovery_target {
             // Recovery complete - transition to Active
             sovereign.state = SovereignStatus::Active;
+            sovereign.recovery_complete = true;
             
             // Unlock the pool via SAMM CPI (remove LP restrictions)
             // This allows external LPs to enter the pool
@@ -212,6 +439,49 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
                 msg!("Pool restrictions removed - external LPs can now enter");
             }
             
+            // FairLaunch: auto-renounce sell fee on recovery completion
+            // Sets transfer fee to 0% and marks as renounced
+            if sovereign.fee_mode == FeeMode::FairLaunch && !sovereign.fee_control_renounced {
+                let old_fee = sovereign.sell_fee_bps;
+                let sovereign_id_bytes = sovereign.sovereign_id.to_le_bytes();
+                let sov_seeds = &[
+                    SOVEREIGN_SEED,
+                    &sovereign_id_bytes[..],
+                    &[sovereign.bump],
+                ];
+                let sov_signer = &[&sov_seeds[..]];
+                
+                // Set transfer fee to 0
+                let set_fee_ix = transfer_fee_ix::set_transfer_fee(
+                    &spl_token_2022::ID,
+                    &ctx.accounts.token_mint.key(),
+                    &sovereign.key(),
+                    &[],
+                    0, // 0% fee
+                    0, // max fee = 0
+                )?;
+                
+                invoke_signed(
+                    &set_fee_ix,
+                    &[
+                        ctx.accounts.token_mint.to_account_info(),
+                        sovereign.to_account_info(),
+                    ],
+                    sov_signer,
+                )?;
+                
+                sovereign.sell_fee_bps = 0;
+                sovereign.fee_control_renounced = true;
+                
+                emit!(SellFeeRenounced {
+                    sovereign_id: sovereign.sovereign_id,
+                    old_fee_bps: old_fee,
+                    renounced_by: ctx.accounts.claimer.key(),
+                });
+                
+                msg!("FairLaunch: sell fee auto-renounced to 0%");
+            }
+            
             emit!(PoolRestricted {
                 sovereign_id: sovereign.sovereign_id,
                 restricted: false,
@@ -224,51 +494,8 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
                 completed_at: clock.unix_timestamp,
             });
         }
-    } else if sovereign.state == SovereignStatus::Active {
-        // Post-recovery fee distribution based on fee mode
-        match sovereign.fee_mode {
-            FeeMode::CreatorRevenue => {
-                // Creator gets up to fee_threshold_bps
-                let max_creator_share = sol_fees_collected
-                    .checked_mul(sovereign.fee_threshold_bps as u64).unwrap()
-                    .checked_div(BPS_DENOMINATOR as u64).unwrap();
-                
-                // If creator has renounced fees (fee_threshold_bps = 0), they get nothing
-                if sovereign.fee_threshold_bps > 0 && !creator_tracker.threshold_renounced {
-                    creator_fee_share = max_creator_share;
-                    investor_fee_share = sol_fees_collected.checked_sub(creator_fee_share).unwrap();
-                }
-            },
-            FeeMode::RecoveryBoost => {
-                // All fees continue to investors (was for recovery acceleration)
-                creator_fee_share = 0;
-                investor_fee_share = sol_fees_collected;
-            },
-            FeeMode::FairLaunch => {
-                // All fees to investors
-                creator_fee_share = 0;
-                investor_fee_share = sol_fees_collected;
-            },
-        }
     }
-    
-    // Update creator fee tracker
-    if creator_fee_share > 0 {
-        creator_tracker.total_earned = creator_tracker.total_earned
-            .checked_add(creator_fee_share)
-            .unwrap();
-        creator_tracker.pending_withdrawal = creator_tracker.pending_withdrawal
-            .checked_add(creator_fee_share)
-            .unwrap();
-    }
-    
-    // Protocol fee (taken from total before distribution) - using unwind_fee_bps for fee collection
-    let protocol_fee = sol_fees_collected
-        .checked_mul(protocol.unwind_fee_bps as u64).unwrap()
-        .checked_div(BPS_DENOMINATOR as u64).unwrap();
-    
-    // Investor share is reduced by protocol fee
-    investor_fee_share = investor_fee_share.saturating_sub(protocol_fee);
+    // Active state: SAMM trading fees still go 100% to investors, no special logic needed
     
     // Update sovereign tracking
     sovereign.total_fees_collected = sovereign.total_fees_collected
@@ -279,9 +506,9 @@ pub fn handler<'info>(ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>) -> R
         sovereign_id: sovereign.sovereign_id,
         sol_fees: sol_fees_collected,
         token_fees: token_fees_collected,
-        creator_share: creator_fee_share,
+        creator_share: 0,
         investor_share: investor_fee_share,
-        protocol_share: protocol_fee,
+        protocol_share: 0,
         total_recovered: sovereign.total_recovered,
         recovery_target: sovereign.recovery_target,
     });
@@ -491,15 +718,6 @@ pub fn withdraw_creator_fees_handler(ctx: Context<WithdrawCreatorFees>) -> Resul
 // HARVEST TRANSFER FEES (Token-2022 TransferFeeConfig)
 // ============================================================
 
-use anchor_spl::token_2022::{
-    Token2022,
-    spl_token_2022::{
-        self,
-        extension::transfer_fee::instruction as transfer_fee_ix,
-    },
-};
-use anchor_spl::token_interface::{Mint as MintInterface, TokenAccount as TokenAccountInterface};
-use anchor_lang::solana_program::program::invoke_signed;
 use crate::events::TransferFeesHarvested;
 
 /// Harvest withheld transfer fees from token accounts
@@ -686,6 +904,246 @@ pub fn harvest_transfer_fees_handler<'info>(
     });
     
     msg!("Transfer fees harvested - to_creator: {}, fee_mode: {:?}", to_creator, sovereign.fee_mode);
+    
+    Ok(())
+}
+
+// ============================================================
+// SWAP RECOVERY TOKENS → GOR (via SAMM CPI)
+// ============================================================
+
+/// Swap sovereign tokens from the recovery token vault into GOR (via SAMM).
+/// This is step 2 of the recovery fee flow:
+///   1. harvestTransferFees — collects Token-2022 withheld fees into recovery_token_vault
+///   2. swapRecoveryTokens — swaps those tokens to GOR via SAMM and adds to fee_vault
+///
+/// Only callable during Recovery when fee_mode is RecoveryBoost or FairLaunch.
+/// Anyone can call this (permissionless — benefits all depositors).
+///
+/// remaining_accounts order:
+///   [0]  amm_config           — SAMM AMM config (readonly)
+///   [1]  pool_state           — SAMM pool state (writable)
+///   [2]  samm_input_vault     — SAMM pool vault for sovereign token (writable)
+///   [3]  samm_output_vault    — SAMM pool vault for WGOR (writable)
+///   [4]  observation_state    — SAMM observation state (writable)
+///   [5]  token_program_2022   — Token-2022 program (readonly)
+///   [6]  memo_program         — Memo program (readonly)
+///   [7]  wgor_mint            — WGOR mint address (readonly)
+///   [8..N] tick_arrays        — SAMM tick arrays for swap path (writable)
+#[derive(Accounts)]
+pub struct SwapRecoveryTokens<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    
+    #[account(
+        seeds = [PROTOCOL_STATE_SEED],
+        bump = protocol_state.bump
+    )]
+    pub protocol_state: Account<'info, ProtocolState>,
+    
+    #[account(
+        mut,
+        seeds = [SOVEREIGN_SEED, &sovereign.sovereign_id.to_le_bytes()],
+        bump = sovereign.bump
+    )]
+    pub sovereign: Account<'info, SovereignState>,
+    
+    #[account(
+        seeds = [PERMANENT_LOCK_SEED, sovereign.key().as_ref()],
+        bump = permanent_lock.bump
+    )]
+    pub permanent_lock: Account<'info, PermanentLock>,
+    
+    /// Token mint (sovereign's Token-2022 mint)
+    #[account(
+        address = sovereign.token_mint
+    )]
+    pub token_mint: InterfaceAccount<'info, MintInterface>,
+    
+    /// Recovery token vault — holds harvested transfer fees (Token-2022)
+    /// Owned by the sovereign PDA
+    #[account(
+        mut,
+        token::mint = token_mint,
+        seeds = [TOKEN_VAULT_SEED, sovereign.key().as_ref()],
+        bump
+    )]
+    pub recovery_token_vault: InterfaceAccount<'info, TokenAccountInterface>,
+    
+    /// WGOR ATA for the sovereign PDA — intermediate account for swap output
+    /// Created by the caller before this instruction (use createAssociatedTokenAccountIdempotent)
+    /// CHECK: Validated as WGOR ATA owned by sovereign PDA
+    #[account(
+        mut,
+        constraint = sovereign_wgor_ata.owner == sovereign.key() @ SovereignError::Unauthorized,
+    )]
+    pub sovereign_wgor_ata: Account<'info, TokenAccount>,
+    
+    /// Fee vault (sol_vault PDA) — destination for unwrapped GOR
+    /// CHECK: PDA that collects fees for investors
+    #[account(
+        mut,
+        seeds = [SOL_VAULT_SEED, sovereign.key().as_ref()],
+        bump
+    )]
+    pub fee_vault: SystemAccount<'info>,
+    
+    /// CHECK: Trashbin SAMM program
+    #[account(address = SAMM_PROGRAM_ID)]
+    pub samm_program: UncheckedAccount<'info>,
+    
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+pub fn swap_recovery_tokens_handler<'info>(
+    ctx: Context<'_, '_, 'info, 'info, SwapRecoveryTokens<'info>>,
+) -> Result<()> {
+    let sovereign = &mut ctx.accounts.sovereign;
+    let protocol = &ctx.accounts.protocol_state;
+    let permanent_lock = &ctx.accounts.permanent_lock;
+    
+    // Checks
+    require!(!protocol.paused, SovereignError::ProtocolPaused);
+    require!(
+        sovereign.state == SovereignStatus::Recovery,
+        SovereignError::InvalidState
+    );
+    require!(
+        sovereign.sovereign_type == SovereignType::TokenLaunch,
+        SovereignError::InvalidSovereignType
+    );
+    // Only RecoveryBoost and FairLaunch route tokens to investors
+    require!(
+        sovereign.fee_mode == FeeMode::RecoveryBoost || 
+        sovereign.fee_mode == FeeMode::FairLaunch,
+        SovereignError::InvalidFeeMode
+    );
+    
+    // Validate pool_state matches sovereign's stored pool
+    require!(
+        ctx.remaining_accounts.len() >= 9,
+        SovereignError::InsufficientAccounts
+    );
+    require!(
+        ctx.remaining_accounts[1].key() == permanent_lock.pool_state,
+        SovereignError::InvalidPool
+    );
+    
+    // Read token vault balance — this is what we'll swap
+    let swap_amount = ctx.accounts.recovery_token_vault.amount;
+    if swap_amount == 0 {
+        msg!("No tokens in recovery vault to swap");
+        return Ok(());
+    }
+    
+    // Derive sovereign PDA signer
+    let sovereign_id_bytes = sovereign.sovereign_id.to_le_bytes();
+    let sovereign_seeds = &[
+        SOVEREIGN_SEED,
+        &sovereign_id_bytes[..],
+        &[sovereign.bump],
+    ];
+    let sovereign_signer = &[&sovereign_seeds[..]];
+    
+    // Collect tick arrays from remaining_accounts[8..]
+    let tick_arrays: Vec<AccountInfo<'info>> = ctx.remaining_accounts[8..].to_vec();
+    
+    // Build SAMM swap accounts
+    let swap_accounts = samm_ix::SwapV2Accounts {
+        payer: sovereign.to_account_info(),                        // Sovereign PDA signs (owns token vault)
+        amm_config: ctx.remaining_accounts[0].clone(),             // AMM config
+        pool_state: ctx.remaining_accounts[1].clone(),             // Pool state
+        input_token_account: ctx.accounts.recovery_token_vault.to_account_info(), // Token vault (input)
+        output_token_account: ctx.accounts.sovereign_wgor_ata.to_account_info(), // WGOR ATA (output)
+        input_vault: ctx.remaining_accounts[2].clone(),            // SAMM vault for token
+        output_vault: ctx.remaining_accounts[3].clone(),           // SAMM vault for WGOR
+        observation_state: ctx.remaining_accounts[4].clone(),      // Observation state
+        token_program: ctx.accounts.token_program.to_account_info(),
+        token_program_2022: ctx.remaining_accounts[5].clone(),     // Token-2022 program
+        memo_program: ctx.remaining_accounts[6].clone(),           // Memo program
+        input_vault_mint: ctx.accounts.token_mint.to_account_info(), // Sovereign token mint
+        output_vault_mint: ctx.remaining_accounts[7].clone(),      // WGOR mint
+    };
+    
+    // Execute swap: tokens → WGOR (min_amount_out = 0 for now, slippage handled by caller)
+    samm_cpi::swap_exact_input(
+        &ctx.accounts.samm_program.to_account_info(),
+        swap_accounts,
+        swap_amount,
+        0, // min_amount_out — accept any output (permissionless call, no MEV risk for protocol tokens)
+        0, // sqrt_price_limit — 0 means no limit
+        tick_arrays,
+        sovereign_signer,
+    )?;
+    
+    msg!("Swapped {} tokens for WGOR via SAMM", swap_amount);
+    
+    // Read WGOR balance received
+    ctx.accounts.sovereign_wgor_ata.reload()?;
+    let wgor_amount = ctx.accounts.sovereign_wgor_ata.amount;
+    
+    if wgor_amount > 0 {
+        // Close WGOR ATA → unwraps WGOR to native GOR → lamports go to fee_vault
+        let close_wgor_ix = anchor_lang::solana_program::instruction::Instruction {
+            program_id: anchor_spl::token::ID,
+            accounts: vec![
+                anchor_lang::solana_program::instruction::AccountMeta::new(
+                    ctx.accounts.sovereign_wgor_ata.key(), false,
+                ),
+                anchor_lang::solana_program::instruction::AccountMeta::new(
+                    ctx.accounts.fee_vault.key(), false,
+                ),
+                anchor_lang::solana_program::instruction::AccountMeta::new_readonly(
+                    sovereign.key(), true,
+                ),
+            ],
+            data: vec![9u8], // SPL Token CloseAccount instruction discriminator
+        };
+        
+        invoke_signed(
+            &close_wgor_ix,
+            &[
+                ctx.accounts.sovereign_wgor_ata.to_account_info(),
+                ctx.accounts.fee_vault.to_account_info(),
+                sovereign.to_account_info(),
+            ],
+            sovereign_signer,
+        )?;
+        
+        msg!("WGOR ATA closed → {} WGOR unwrapped to fee_vault", wgor_amount);
+        
+        // Update recovery tracking
+        sovereign.total_recovered = sovereign.total_recovered
+            .checked_add(wgor_amount)
+            .unwrap();
+        sovereign.total_fees_collected = sovereign.total_fees_collected
+            .checked_add(wgor_amount)
+            .unwrap();
+        
+        // Check if recovery is now complete
+        if sovereign.total_recovered >= sovereign.recovery_target {
+            sovereign.state = SovereignStatus::Active;
+            sovereign.recovery_complete = true;
+            
+            msg!("Recovery complete! Transitioning to Active state");
+            
+            emit!(RecoveryComplete {
+                sovereign_id: sovereign.sovereign_id,
+                total_recovered: sovereign.total_recovered,
+                recovery_target: sovereign.recovery_target,
+                completed_at: Clock::get()?.unix_timestamp,
+            });
+        }
+    }
+    
+    emit!(RecoveryTokensSwapped {
+        sovereign_id: sovereign.sovereign_id,
+        tokens_swapped: swap_amount,
+        sol_received: wgor_amount,
+        total_recovered: sovereign.total_recovered,
+        recovery_target: sovereign.recovery_target,
+    });
     
     Ok(())
 }

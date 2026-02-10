@@ -287,6 +287,7 @@ pub fn collect_fees<'info>(
         readonly(accounts.memo_program.key()),
         readonly(accounts.vault_0_mint.key()),
         readonly(accounts.vault_1_mint.key()),
+        writable(accounts.tick_array_bitmap_extension.key()),
     ];
     
     let ix = Instruction {
@@ -312,6 +313,7 @@ pub fn collect_fees<'info>(
         accounts.memo_program,
         accounts.vault_0_mint,
         accounts.vault_1_mint,
+        accounts.tick_array_bitmap_extension,
         samm_program.clone(),
     ];
     
