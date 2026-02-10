@@ -958,8 +958,7 @@ pub fn mint_genesis_nft_handler(ctx: Context<MintGenesisNFT>) -> Result<()> {
     // The depositor's address is encoded in the URI so buyers on
     // the secondary market can derive the deposit_record PDA.
     let nft_name = format!(
-        "{} Genesis #{}", 
-        &sovereign.name[..sovereign.name.len().min(20)],
+        "$overeign#{}", 
         sovereign.sovereign_id,
     );
     let nft_symbol = String::from("GNFT");
